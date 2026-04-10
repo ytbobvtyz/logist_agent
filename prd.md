@@ -6,7 +6,7 @@ API ключ от OPENROUTER находится в файле .env в корне
 API ключ от yandex находится в файле .env в корне проекта, переменная YANDEX_MAPS_API_KEY.
 
 Стек: 
-streamlit
+gradio
 mcp
 httpx
 python-dotenv
@@ -51,7 +51,7 @@ text
 route_planner/
 ├── mcp_server.py       # MCP сервер с 3 инструментами
 ├── agent.py            # LLM агент для вызова пайплайна
-├── app.py              # Streamlit UI
+├── app.py              # Gradio UI
 └── requirements.txt
 🔧 MCP Инструменты
 Tool 1: geocode_batch
@@ -186,7 +186,7 @@ System prompt для агента:
 def haversine(lat1, lon1, lat2, lon2) -> float:
     # Возвращает расстояние в км
 
-## Streamlit UI (app.py)
+## Gradio UI (app.py)
 
 - Заголовок: "🗺️ Твой логист-ассистент"
 - Чат-интерфейс (как в ChatGPT)
@@ -198,6 +198,37 @@ def haversine(lat1, lon1, lat2, lon2) -> float:
     * Окошко отладки, позволяющее просмотреть факт и успешность обращений к MCP
 - Авто-скролл к последнему сообщению
 
+### Боковая панель: выбор модели
+
+Добавить выпадающий список (gr.Dropdown) с опциями:
+
+**Бесплатные:**
+- `qwen/qwen3.6-plus-preview:free` (по умолчанию)
+- `stepfun/step-3.5-flash:free`
+- `openrouter/free`
+
+**Платные:**
+- `xiaomi/mimo-v2-pro`
+- `minimax/minimax-m2.5`
+- `deepseek/deepseek-v3.2`
+
+При смене модели агент пересоздаётся с новой конфигурацией.
+
+### Окно отладки (gr.JSON или gr.Textbox)
+
+Отображать в реальном времени:
+- Вызовы MCP инструментов (какой инструмент, с какими параметрами)
+- Результаты каждого инструмента
+- Ошибки (если есть)
+- Время выполнения каждого шага
+
+Формат:
+[10:30:01] 🔧 geocode_batch(cities=["Москва", "Санкт-Петербург", "Казань"])
+[10:30:02] ✅ Результат: 3 города найдены
+[10:30:02] 🔧 find_optimal_route(coordinates_json={...})
+[10:30:03] ✅ Маршрут: Москва → Казань → Санкт-Петербург (2320 км)
+[10:30:03] 🔧 format_route_summary(route_json={...})
+[10:30:03] ✅ Ответ сгенерирован
 
 ## Тестовые запросы для проверки
 
@@ -227,6 +258,6 @@ format_route_summary возвращает красивый текст
 
 Тестовые запросы успешны
 
-Streamlit UI показывает диалог с агентом и статусы
+Gradio UI показывает диалог с агентом и статусы
 
 Созданы файлы readme.md и run.md

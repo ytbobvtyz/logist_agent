@@ -2,3 +2,6 @@ node_modules/
 .env
 venv/
 venv
+__pycache__
+route_planner_streamlit_backup/
+route_planner_streamlit_backup
