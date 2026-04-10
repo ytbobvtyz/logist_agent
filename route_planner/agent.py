@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import asyncio
+import anyio
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
@@ -66,7 +67,9 @@ class RoutePlannerAgent:
         self.model = model
         self.client = AsyncOpenAI(
             api_key=OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1"
+            base_url="https://openrouter.ai/api/v1",
+            timeout=120.0,
+            max_retries=2
         )
         self.mcp_session: Optional[ClientSession] = None
         self.mcp_tools: List[Dict[str, Any]] = []
@@ -127,15 +130,22 @@ class RoutePlannerAgent:
     
     async def disconnect_mcp(self):
         """Отключается от MCP сервера."""
-        try:
-            if self.mcp_session:
+        self.state.mcp_available = False
+        
+        # Закрываем сессию
+        if self.mcp_session:
+            try:
                 await self.mcp_session.__aexit__(None, None, None)
-                self.mcp_session = None
-            if self._mcp_cm:
-                await self._mcp_cm.__aexit__(None, None, None)
-                self._mcp_cm = None
-        except Exception as e:
-            print(f"Ошибка отключения MCP: {e}")
+            except Exception:
+                pass
+            self.mcp_session = None
+        
+        # Не вызываем __aexit__ на контекстном менеджере, т.к. это вызывает
+        # cancel scope error при вызове из другого потока/задачи.
+        # Вместо этого просто обнуляем ссылку — процесс MCP сервера
+        # завершится сам при закрытии stdin или при завершении приложения.
+        self._mcp_cm = None
+        self.mcp_tools = []
     
     async def call_mcp_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         """

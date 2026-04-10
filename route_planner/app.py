@@ -7,6 +7,7 @@ import gradio as gr
 import asyncio
 import sys
 import os
+import threading
 from typing import List, Tuple, Dict, Optional
 
 # Добавляем текущую директорию в путь для импорта
@@ -14,6 +15,29 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from agent import RoutePlannerAgent, OPENROUTER_MODELS
 
+
+# ── Фоновый event loop в отдельном потоке ──────────────────────────────
+
+_bg_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+_bg_thread: threading.Thread
+
+
+def _run_bg_loop(loop: asyncio.AbstractEventLoop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+
+_bg_thread = threading.Thread(target=_run_bg_loop, args=(_bg_loop,), daemon=True)
+_bg_thread.start()
+
+
+def run_async(coro):
+    """Запускает корутину на фоновом loop'е и ждёт результат (блокирующий вызов)."""
+    future = asyncio.run_coroutine_threadsafe(coro, _bg_loop)
+    return future.result(timeout=120)
+
+
+# ── Состояние приложения ────────────────────────────────────────────────
 
 class AppState:
     """Глобальное состояние приложения."""
@@ -26,51 +50,38 @@ class AppState:
 app_state = AppState()
 
 
-async def init_agent_async(model: str) -> Tuple[Optional[RoutePlannerAgent], bool]:
-    """Инициализация агента."""
-    try:
-        agent = RoutePlannerAgent(model=model)
-        success = await agent.connect_mcp()
-        return agent, success
-    except Exception as e:
-        print(f"Ошибка инициализации агента: {e}")
-        return None, False
-
+# ── Функции-обёртки (синхронные, вызываются из Gradio) ──────────────────
 
 def init_agent(model: str) -> Tuple[Optional[RoutePlannerAgent], bool]:
-    """Синхронная обёртка для инициализации агента."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    """Инициализация агента на фоновом loop'е."""
+    async def _init():
+        try:
+            agent = RoutePlannerAgent(model=model)
+            success = await agent.connect_mcp()
+            return agent, success
+        except Exception as e:
+            print(f"Ошибка инициализации агента: {e}")
+            return None, False
+
     try:
-        # Add timeout for MCP connection
-        return loop.run_until_complete(asyncio.wait_for(init_agent_async(model), timeout=10.0))
-    except asyncio.TimeoutError:
-        print("MCP connection timeout - continuing without MCP")
-        return None, False
+        return run_async(_init())
     except Exception as e:
         print(f"Ошибка инициализации агента: {e}")
         return None, False
-    finally:
-        loop.close()
-
-
-async def process_message_async(agent: Optional[RoutePlannerAgent], message: str) -> str:
-    """Асинхронная обработка сообщения."""
-    if not agent:
-        return "❌ Агент не инициализирован"
-    return await agent.process_message(message)
 
 
 def process_message(agent: Optional[RoutePlannerAgent], message: str) -> str:
     """Синхронная обёртка для обработки сообщения."""
     if not agent:
         return "❌ Агент не инициализирован"
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+
+    async def _process():
+        return await agent.process_message(message)
+
     try:
-        return loop.run_until_complete(process_message_async(agent, message))
-    finally:
-        loop.close()
+        return run_async(_process())
+    except Exception as e:
+        return f"❌ Ошибка: {e}"
 
 
 def format_mcp_calls(agent: Optional[RoutePlannerAgent]) -> str:
@@ -120,6 +131,9 @@ def chat_response(message: str, history: list) -> Tuple[list, str]:
     # Получаем ответ от агента
     response = process_message(app_state.agent, message)
     
+    # Синхронизируем статус MCP с реальным состоянием агента
+    app_state.mcp_connected = app_state.agent.state.mcp_available if app_state.agent else False
+    
     # Форматируем ответ для Gradio Chatbot (messages format)
     new_history = history + [
         {"role": "user", "content": message},
@@ -146,10 +160,7 @@ def update_model(model_name: str):
         # Отключаем старого агента
         if app_state.agent:
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(app_state.agent.disconnect_mcp())
-                loop.close()
+                run_async(app_state.agent.disconnect_mcp())
             except Exception:
                 pass
         app_state.agent = None
@@ -162,10 +173,7 @@ def reconnect_mcp():
     """Переподключает MCP."""
     if app_state.agent:
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(app_state.agent.disconnect_mcp())
-            loop.close()
+            run_async(app_state.agent.disconnect_mcp())
         except Exception:
             pass
     app_state.agent = None
@@ -242,48 +250,48 @@ with gr.Blocks(
                     show_label=False
                 )
                 send_btn = gr.Button("Отправить", variant="primary", scale=1)
-    
-    # Обработчики событий
-    def handle_message(message: str, history: list):
-        """Обрабатывает сообщение и возвращает обновленную историю и отладку."""
-        new_history, debug = chat_response(message, history)
-        return new_history, debug, ""
-    
-    msg_input.submit(
-        fn=handle_message,
-        inputs=[msg_input, chatbot],
-        outputs=[chatbot, debug_output, msg_input],
-        show_progress="hidden"
-    )
-    
-    send_btn.click(
-        fn=handle_message,
-        inputs=[msg_input, chatbot],
-        outputs=[chatbot, debug_output, msg_input],
-        show_progress="hidden"
-    )
-    
-    model_dropdown.change(
-        fn=update_model,
-        inputs=[model_dropdown],
-        outputs=[model_status]
-    )
-    
-    reconnect_btn.click(
-        fn=reconnect_mcp,
-        outputs=[mcp_status]
-    )
-    
-    clear_btn.click(
-        fn=clear_history,
-        outputs=[chatbot, debug_output]
-    )
-    
-    # Авто-обновление статуса MCP при загрузке
-    demo.load(
-        fn=get_mcp_status,
-        outputs=[mcp_status]
-    )
+
+        # Обработчики событий
+        def handle_message(message: str, history: list):
+            """Обрабатывает сообщение и возвращает обновленную историю и отладку."""
+            new_history, debug = chat_response(message, history)
+            return new_history, debug, ""
+
+        msg_input.submit(
+            fn=handle_message,
+            inputs=[msg_input, chatbot],
+            outputs=[chatbot, debug_output, msg_input],
+            show_progress="hidden"
+        )
+
+        send_btn.click(
+            fn=handle_message,
+            inputs=[msg_input, chatbot],
+            outputs=[chatbot, debug_output, msg_input],
+            show_progress="hidden"
+        )
+
+        model_dropdown.change(
+            fn=update_model,
+            inputs=[model_dropdown],
+            outputs=[model_status]
+        )
+
+        reconnect_btn.click(
+            fn=reconnect_mcp,
+            outputs=[mcp_status]
+        )
+
+        clear_btn.click(
+            fn=clear_history,
+            outputs=[chatbot, debug_output]
+        )
+
+        # Авто-обновление статуса MCP при загрузке
+        demo.load(
+            fn=get_mcp_status,
+            outputs=[mcp_status]
+        )
 
 
 if __name__ == "__main__":
