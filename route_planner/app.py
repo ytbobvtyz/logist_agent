@@ -27,7 +27,7 @@ class AppState:
 app_state = AppState()
 
 
-async def init_agent_async(model: str) -> Tuple[RoutePlannerAgent, bool]:
+async def init_agent_async(model: str) -> Tuple[RoutePlannerAgent | None, bool]:
     """
     Инициализация агента.
     
@@ -43,7 +43,7 @@ async def init_agent_async(model: str) -> Tuple[RoutePlannerAgent, bool]:
         return None, False
 
 
-def init_agent(model: str) -> Tuple[RoutePlannerAgent, bool]:
+def init_agent(model: str) -> Tuple[RoutePlannerAgent | None, bool]:
     """Синхронная обёртка для инициализации агента."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -53,13 +53,17 @@ def init_agent(model: str) -> Tuple[RoutePlannerAgent, bool]:
         loop.close()
 
 
-async def process_message_async(agent: RoutePlannerAgent, message: str) -> str:
+async def process_message_async(agent: RoutePlannerAgent | None, message: str) -> str:
     """Асинхронная обработка сообщения."""
+    if not agent:
+        return "❌ Агент не инициализирован"
     return await agent.process_message(message)
 
 
-def process_message(agent: RoutePlannerAgent, message: str) -> str:
+def process_message(agent: RoutePlannerAgent | None, message: str) -> str:
     """Синхронная обёртка для обработки сообщения."""
+    if not agent:
+        return "❌ Агент не инициализирован"
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -68,7 +72,7 @@ def process_message(agent: RoutePlannerAgent, message: str) -> str:
         loop.close()
 
 
-def format_mcp_calls(agent: RoutePlannerAgent) -> str:
+def format_mcp_calls(agent: RoutePlannerAgent | None) -> str:
     """Форматирует вызовы MCP для отладки."""
     if not agent:
         return "Агент не инициализирован"
@@ -112,8 +116,11 @@ def chat_response(message: str, history: List[List[Dict[str, str]]]) -> Tuple[Li
     response = process_message(app_state.agent, message)
     
     # Обновляем историю в формате для Chatbot
-    history.append([{"role": "user", "content": message}])
-    history.append([{"role": "assistant", "content": response}])
+    # Каждый элемент истории должен содержать пару сообщений [user, assistant]
+    history.append([
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": response}
+    ])
     
     # Обновляем отладку
     debug = format_mcp_calls(app_state.agent)
@@ -237,14 +244,14 @@ with gr.Blocks(
         fn=chat_response,
         inputs=[msg_input, chatbot],
         outputs=[chatbot, debug_output, msg_input],
-        show_progress=False
+        show_progress="hidden"
     )
     
     send_btn.click(
         fn=chat_response,
         inputs=[msg_input, chatbot],
         outputs=[chatbot, debug_output, msg_input],
-        show_progress=False
+        show_progress="hidden"
     )
     
     model_dropdown.change(
@@ -273,10 +280,10 @@ with gr.Blocks(
 if __name__ == "__main__":
     demo.launch(
         server_name="0.0.0.0",
-        server_port=7861,
+        server_port=7862,
         share=False,
         show_error=True,
-        theme=gr.themes.Soft(),
+        theme="soft",
         css="""
         .main-container { max-width: 1200px; margin: auto; }
         .chat-container { height: 500px; }
