@@ -116,16 +116,18 @@ def chat_response(message: str, history: List[List[Dict[str, str]]]) -> Tuple[Li
     response = process_message(app_state.agent, message)
     
     # Обновляем историю в формате для Chatbot
-    # Каждый элемент истории должен содержать пару сообщений [user, assistant]
-    history.append([
-        {"role": "user", "content": message},
-        {"role": "assistant", "content": response}
-    ])
+    # Gradio Chatbot ожидает, что история содержит пары сообщений
+    # Каждый элемент истории - это список из двух сообщений: [user, assistant]
+    # Мы добавляем новую пару сообщений к существующей истории
+    new_history = history + [
+        [{"role": "user", "content": message},
+         {"role": "assistant", "content": response}]
+    ]
     
     # Обновляем отладку
     debug = format_mcp_calls(app_state.agent)
     
-    return history, debug, ""
+    return new_history, debug, ""
 
 
 def update_model(model_name: str):
