@@ -6,3 +6,4 @@ __pycache__
 route_planner_streamlit_backup/
 route_planner_streamlit_backup
 .rules
+.kilo

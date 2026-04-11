@@ -6,7 +6,7 @@ MCP сервер для планирования маршрутов.
 import json
 import math
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from dotenv import load_dotenv
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -92,6 +92,132 @@ async def geocode_city(city_name: str) -> Dict[str, Any]:
         return {"error": f"Ошибка геокодирования города '{city_name}': {e}", "city": city_name}
 
 
+def solve_tsp_exact(dist_matrix: List[List[float]], n: int) -> Tuple[List[int], float]:
+    """
+    Точное решение TSP методом динамического программирования (алгоритм Хелд-Карпа).
+    Работает для n ≤ 15.
+    
+    Args:
+        dist_matrix: Матрица расстояний
+        n: Количество городов
+    
+    Returns:
+        Tuple (оптимальный маршрут, общее расстояние)
+    """
+    if n <= 1:
+        return [0], 0.0
+    
+    # Алгоритм Хелд-Карпа для TSP
+    # Используем битовые маски для представления подмножеств
+    
+    # Инициализация таблицы DP
+    # dp[mask][last] = минимальное расстояние для посещения городов в mask с последним городом last
+    dp = {}
+    
+    # Инициализация: из города 0 в каждый другой город
+    for i in range(1, n):
+        mask = (1 << i) | 1  # маска с городами 0 и i
+        dp[(mask, i)] = dist_matrix[0][i]
+    
+    # Динамическое программирование
+    for subset_size in range(2, n):
+        for mask in range(1 << n):
+            if bin(mask).count("1") != subset_size or not (mask & 1):
+                continue  # пропускаем маски без города 0 или с неправильным размером
+            
+            for last in range(1, n):
+                if not (mask & (1 << last)):
+                    continue
+                
+                # Ищем минимальное расстояние для этого подмножества
+                min_dist = float('inf')
+                for prev in range(n):
+                    if prev == last or not (mask & (1 << prev)):
+                        continue
+                    
+                    prev_mask = mask ^ (1 << last)
+                    if (prev_mask, prev) in dp:
+                        candidate = dp[(prev_mask, prev)] + dist_matrix[prev][last]
+                        if candidate < min_dist:
+                            min_dist = candidate
+                
+                if min_dist != float('inf'):
+                    dp[(mask, last)] = min_dist
+    
+    # Находим оптимальный маршрут
+    final_mask = (1 << n) - 1
+    min_total = float('inf')
+    best_last = -1
+    
+    for last in range(1, n):
+        if (final_mask, last) in dp:
+            total = dp[(final_mask, last)] + dist_matrix[last][0]
+            if total < min_total:
+                min_total = total
+                best_last = last
+    
+    # Восстанавливаем маршрут
+    if best_last == -1:
+        # Если точный алгоритм не сработал, используем жадный
+        return solve_tsp_greedy(dist_matrix, n)
+    
+    route = []
+    mask = final_mask
+    current = best_last
+    
+    while mask != 1:  # пока не остался только город 0
+        route.append(current)
+        for prev in range(n):
+            if prev == current or not (mask & (1 << prev)):
+                continue
+            
+            prev_mask = mask ^ (1 << current)
+            if (prev_mask, prev) in dp:
+                if abs(dp[(mask, current)] - (dp[(prev_mask, prev)] + dist_matrix[prev][current])) < 1e-6:
+                    mask = prev_mask
+                    current = prev
+                    break
+    
+    route.append(0)  # добавляем стартовый город
+    route.reverse()
+    
+    return route, min_total
+
+
+def solve_tsp_greedy(dist_matrix: List[List[float]], n: int) -> Tuple[List[int], float]:
+    """
+    Жадный алгоритм для TSP.
+    
+    Args:
+        dist_matrix: Матрица расстояний
+        n: Количество городов
+    
+    Returns:
+        Tuple (маршрут, общее расстояние)
+    """
+    visited = [False] * n
+    route_indices = [0]
+    visited[0] = True
+    total_distance = 0.0
+    
+    current = 0
+    for _ in range(n - 1):
+        nearest = -1
+        nearest_dist = float('inf')
+        
+        for j in range(n):
+            if not visited[j] and dist_matrix[current][j] < nearest_dist:
+                nearest = j
+                nearest_dist = dist_matrix[current][j]
+        
+        visited[nearest] = True
+        route_indices.append(nearest)
+        total_distance += nearest_dist
+        current = nearest
+    
+    return route_indices, total_distance
+
+
 @mcp.tool()
 async def geocode_batch(cities: List[str]) -> str:
     """
@@ -106,10 +232,24 @@ async def geocode_batch(cities: List[str]) -> str:
     if len(cities) < 2:
         return json.dumps({"error": "Укажите хотя бы два города"}, ensure_ascii=False)
     
+    # Проверяем ограничение количества городов
+    warning = ""
+    warning_flag = False
+    if len(cities) > 5:
+        truncated_cities = cities[:5]
+        warning = f"⚠️ Я могу обработать только первые 5 городов из {len(cities)}. "
+        warning += f"Будет рассчитан маршрут: {', '.join(truncated_cities)}"
+        
+        # Сохраняем предупреждение для дальнейшего использования
+        cities_to_process = truncated_cities
+        warning_flag = True
+    else:
+        cities_to_process = cities
+    
     results = []
     errors = []
     
-    for city in cities:
+    for city in cities_to_process:
         result = await geocode_city(city)
         if "error" in result:
             errors.append(result)
@@ -120,7 +260,12 @@ async def geocode_batch(cities: List[str]) -> str:
         # Возвращаем первую ошибку
         return json.dumps(errors[0], ensure_ascii=False)
     
-    return json.dumps({"cities": results}, ensure_ascii=False)
+    if warning_flag:
+        result_data = {"cities": results, "warning": warning}
+    else:
+        result_data = {"cities": results}
+    
+    return json.dumps(result_data, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -157,27 +302,13 @@ async def find_optimal_route(coordinates_json: str) -> str:
                 dist_matrix[i][j] = d
                 dist_matrix[j][i] = d
         
-        # Жадный алгоритм для TSP
-        # Начинаем с первого города
-        visited = [False] * n
-        route_indices = [0]
-        visited[0] = True
-        total_distance = 0.0
-        
-        current = 0
-        for _ in range(n - 1):
-            nearest = -1
-            nearest_dist = float('inf')
-            
-            for j in range(n):
-                if not visited[j] and dist_matrix[current][j] < nearest_dist:
-                    nearest = j
-                    nearest_dist = dist_matrix[current][j]
-            
-            visited[nearest] = True
-            route_indices.append(nearest)
-            total_distance += nearest_dist
-            current = nearest
+        # Выбираем алгоритм в зависимости от количества городов
+        if n <= 5:
+            # Точный алгоритм для малого количества городов
+            route_indices, total_distance = solve_tsp_exact(dist_matrix, n)
+        else:
+            # Жадный алгоритм для большего количества городов
+            route_indices, total_distance = solve_tsp_greedy(dist_matrix, n)
         
         # Формируем результат
         route_names = [cities_data[i]["name"] for i in route_indices]
@@ -195,8 +326,13 @@ async def find_optimal_route(coordinates_json: str) -> str:
         result = {
             "route": route_names,
             "segments": segments,
-            "total_distance_km": round(total_distance, 1)
+            "total_distance_km": round(total_distance, 1),
+            "algorithm": "exact" if n <= 5 else "greedy"
         }
+        
+        # Добавляем предупреждение, если оно было в исходных данных
+        if "warning" in data:
+            result["warning"] = data["warning"]
         
         return json.dumps(result, ensure_ascii=False)
     
@@ -231,7 +367,14 @@ async def format_route_summary(route_json: str) -> str:
             return "❌ Маршрут не найден"
         
         # Формируем красивый вывод
-        lines = ["🗺️ Оптимальный маршрут:", ""]
+        lines = []
+        
+        # Добавляем предупреждение, если оно есть
+        if "warning" in data:
+            lines.append(data["warning"])
+            lines.append("")
+        
+        lines.extend(["🗺️ Оптимальный маршрут:", ""])
         
         # Маршрут стрелками
         route_str = " → ".join(route)
@@ -247,6 +390,15 @@ async def format_route_summary(route_json: str) -> str:
         
         # Общее расстояние
         lines.append(f"📊 Общее расстояние: {total_distance} км")
+        
+        # Информация об алгоритме
+        algorithm = data.get("algorithm", "unknown")
+        if algorithm == "exact":
+            lines.append("")
+            lines.append("✅ Использован точный алгоритм оптимизации")
+        elif algorithm == "greedy":
+            lines.append("")
+            lines.append("⚠️ Использован жадный алгоритм (для более чем 5 городов)")
         
         return "\n".join(lines)
     

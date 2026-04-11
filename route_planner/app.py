@@ -108,7 +108,7 @@ def format_mcp_calls(agent: Optional[RoutePlannerAgent]) -> str:
     return "\n".join(lines)
 
 
-def chat_response(message: str, history: list) -> Tuple[list, str]:
+def chat_response(message: str, history: list) -> Tuple[list, str, bool]:
     """
     Обрабатывает сообщение пользователя и возвращает ответ.
     
@@ -117,10 +117,10 @@ def chat_response(message: str, history: list) -> Tuple[list, str]:
         history: История чата в формате messages [{"role": "user", "content": "..."}, ...]
     
     Returns:
-        Tuple (updated_history, debug_log)
+        Tuple (updated_history, debug_log, processing_complete)
     """
     if not message.strip():
-        return history, format_mcp_calls(app_state.agent)
+        return history, format_mcp_calls(app_state.agent), True
     
     # Инициализация агента при первом сообщении
     if not app_state.agent:
@@ -143,7 +143,7 @@ def chat_response(message: str, history: list) -> Tuple[list, str]:
     # Обновляем отладку
     debug = format_mcp_calls(app_state.agent)
     
-    return new_history, debug
+    return new_history, debug, True
 
 
 def update_model(model_name: str):
@@ -194,6 +194,27 @@ def get_mcp_status() -> str:
         return "✅ Подключено"
     else:
         return "❌ Не подключено"
+
+
+def update_loading_indicator(processing_state: bool) -> str:
+    """Обновляет индикатор загрузки."""
+    if processing_state:
+        return """
+            <div style='text-align: center; padding: 10px;'>
+                <div style='display: inline-flex; align-items: center; background: #f0f0f0; padding: 8px 16px; border-radius: 20px;'>
+                    <div style='width: 16px; height: 16px; border: 2px solid #007bff; border-top: 2px solid transparent; border-radius: 50%; animation: spin 1s linear infinite; margin-right: 8px;'></div>
+                    <span style='color: #666;'>Обработка запроса...</span>
+                </div>
+            </div>
+            <style>
+                @keyframes spin {
+                    0% { transform: rotate(0deg); }
+                    100% { transform: rotate(360deg); }
+                }
+            </style>
+        """
+    else:
+        return "<div style='display: none;'></div>"
 
 
 # Создаём Gradio интерфейс
@@ -250,25 +271,50 @@ with gr.Blocks(
                     show_label=False
                 )
                 send_btn = gr.Button("Отправить", variant="primary", scale=1)
+            
+
 
         # Обработчики событий
         def handle_message(message: str, history: list):
-            """Обрабатывает сообщение и возвращает обновленную историю и отладку."""
-            new_history, debug = chat_response(message, history)
+            """Обрабатывает сообщение пользователя."""
+            if not message.strip():
+                return history, format_mcp_calls(app_state.agent), ""
+            
+            # Инициализация агента при первом сообщении
+            if not app_state.agent:
+                agent, success = init_agent(app_state.selected_model)
+                app_state.agent = agent
+                app_state.mcp_connected = success
+            
+            # Получаем ответ от агента
+            response = process_message(app_state.agent, message)
+            
+            # Синхронизируем статус MCP с реальным состоянием агента
+            app_state.mcp_connected = app_state.agent.state.mcp_available if app_state.agent else False
+            
+            # Форматируем ответ для Gradio Chatbot
+            new_history = history + [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": response}
+            ]
+            
+            # Обновляем отладку
+            debug = format_mcp_calls(app_state.agent)
+            
             return new_history, debug, ""
 
         msg_input.submit(
             fn=handle_message,
             inputs=[msg_input, chatbot],
             outputs=[chatbot, debug_output, msg_input],
-            show_progress="hidden"
+            show_progress="minimal"
         )
 
         send_btn.click(
             fn=handle_message,
             inputs=[msg_input, chatbot],
             outputs=[chatbot, debug_output, msg_input],
-            show_progress="hidden"
+            show_progress="minimal"
         )
 
         model_dropdown.change(
