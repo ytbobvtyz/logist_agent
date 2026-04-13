@@ -85,7 +85,10 @@ def process_message(agent: Optional[RoutePlannerAgent], message: str) -> str:
         return await agent.process_message(message)
 
     try:
-        return run_async(_process())
+        result = run_async(_process())
+        if "API ПЭК вернул ошибку HTTP" in result:
+            return "Cервис ПЭК в данный момент недоступен. Пожалуйста, попробуйте позже."
+        return result
     except Exception as e:
         return f"❌ Ошибка: {e}"
 
