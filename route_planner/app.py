@@ -44,6 +44,7 @@ class AppState:
     def __init__(self):
         self.agent: Optional[RoutePlannerAgent] = None
         self.mcp_connected: bool = False
+        self.mcp_servers_status: Dict[str, bool] = {}
         self.selected_model: str = "openrouter/free"
 
 
@@ -58,6 +59,11 @@ def init_agent(model: str) -> Tuple[Optional[RoutePlannerAgent], bool]:
         try:
             agent = RoutePlannerAgent(model=model)
             success = await agent.connect_mcp()
+            # Сохраняем статус серверов
+            if agent.orchestrator.sessions:
+                app_state.mcp_servers_status = {
+                    name: True for name in agent.orchestrator.sessions.keys()
+                }
             return agent, success
         except Exception as e:
             print(f"Ошибка инициализации агента: {e}")
@@ -190,10 +196,19 @@ def clear_history():
 
 def get_mcp_status() -> str:
     """Возвращает статус MCP."""
-    if app_state.mcp_connected:
-        return "✅ Подключено"
+    if not app_state.agent:
+        return "❌ Агент не инициализирован"
+    
+    # Получаем статус всех серверов
+    servers = []
+    if app_state.agent.orchestrator.sessions:
+        for server_name in app_state.agent.orchestrator.sessions.keys():
+            servers.append(f"✅ {server_name}")
+    
+    if servers:
+        return "\n".join(servers)
     else:
-        return "❌ Не подключено"
+        return "❌ Нет подключенных серверов"
 
 
 def update_loading_indicator(processing_state: bool) -> str:
@@ -240,8 +255,13 @@ with gr.Blocks(
             
             model_status = gr.Markdown(f"Модель: {model_names[0]}")
             
-            gr.Markdown("## 📡 Статус MCP")
-            mcp_status = gr.Markdown(get_mcp_status())
+            gr.Markdown("## 📡 Статус MCP серверов")
+            mcp_status = gr.Textbox(
+                value=get_mcp_status(),
+                label="Подключенные серверы",
+                interactive=False,
+                lines=3
+            )
             
             reconnect_btn = gr.Button("🔄 Переподключить MCP", variant="secondary")
             
@@ -278,7 +298,7 @@ with gr.Blocks(
         def handle_message(message: str, history: list):
             """Обрабатывает сообщение пользователя."""
             if not message.strip():
-                return history, format_mcp_calls(app_state.agent), ""
+                return history, format_mcp_calls(app_state.agent), "", get_mcp_status()
             
             # Инициализация агента при первом сообщении
             if not app_state.agent:
@@ -298,22 +318,23 @@ with gr.Blocks(
                 {"role": "assistant", "content": response}
             ]
             
-            # Обновляем отладку
+            # Обновляем отладку и статус
             debug = format_mcp_calls(app_state.agent)
+            mcp_status_text = get_mcp_status()
             
-            return new_history, debug, ""
+            return new_history, debug, "", mcp_status_text
 
         msg_input.submit(
             fn=handle_message,
             inputs=[msg_input, chatbot],
-            outputs=[chatbot, debug_output, msg_input],
+            outputs=[chatbot, debug_output, msg_input, mcp_status],
             show_progress="minimal"
         )
 
         send_btn.click(
             fn=handle_message,
             inputs=[msg_input, chatbot],
-            outputs=[chatbot, debug_output, msg_input],
+            outputs=[chatbot, debug_output, msg_input, mcp_status],
             show_progress="minimal"
         )
 

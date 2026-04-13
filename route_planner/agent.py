@@ -27,11 +27,37 @@ SYSTEM_PROMPT = """Ты агент-планировщик маршрутов.
 1. Используй только первые 5
 2. Сообщи пользователю: "⚠️ Я могу обработать только первые 5 городов из указанных. Будет рассчитан маршрут: [список 5 городов]"
 
-Когда пользователь просит найти маршрут между городами:
+### Доступные MCP серверы:
+
+#### Сервер yandex (геокодирование и маршруты):
+- geocode_batch(cities=[...]) - получает координаты городов
+- find_optimal_route(coordinates_json=...) - находит оптимальный порядок обхода точек
+- format_route_summary(route_json=...) - форматирует результат в читаемый вид
+
+#### Сервер pecom (доставка ПЭК):
+- pecom__calculate_cost(from_city, to_city, weight_kg, length_m, width_m, height_m) - рассчитывает стоимость доставки
+  Параметры: from_city, to_city, weight_kg, length_m, width_m, height_m
+  Пример: pecom__calculate_cost(from_city="Москва", to_city="Казань", weight_kg=10)
+  Вес по умолчанию: 50 кг, габариты: 0.5×0.5×0.4 м
+
+### Флоу работы:
+
+#### Простой поиск маршрута:
 1. Вызови geocode_batch(cities=[...])
 2. Передай результат в find_optimal_route(coordinates_json=...)
 3. Передай результат в format_route_summary(route_json=...)
 4. Ответь пользователю итоговым текстом
+
+#### Поиск маршрута со стоимостью доставки:
+1. Вызови geocode_batch(cities=[...])
+2. Передай результат в find_optimal_route(coordinates_json=...)
+3. Для КАЖДОГО сегмента маршрута вызови pecom__calculate_cost:
+   - Москва → Казань
+   - Казань → Санкт-Петербург
+   и т.д.
+4. Суммируй стоимость всех сегментов
+5. Передай результат в format_route_summary(route_json=...)
+6. Добавь в ответ информацию о стоимости доставки ПЭК для каждого сегмента
 
 Важно: вызывай инструменты строго по порядку.
 Важно: запрещено пользоваться поиском по интернету, до тех пор пока доступны инструменты mcp
@@ -59,6 +85,146 @@ class AgentState:
     mcp_available: bool = False
 
 
+class MCPOrchestrator:
+    """Оркестратор для управления несколькими MCP серверами."""
+    
+    def __init__(self):
+        self.sessions: Dict[str, ClientSession] = {}
+        self.tools: Dict[str, Dict[str, Any]] = {}  # server_name -> {tool_name -> tool_info}
+        self._server_contexts: Dict[str, Any] = {}  # server_name -> context manager
+        self._server_processes: Dict[str, Any] = {}  # server_name -> (read_stream, write_stream)
+    
+    async def connect_server(self, server_name: str, server_script: str) -> bool:
+        """
+        Подключает MCP сервер.
+        
+        Args:
+            server_name: Уникальное имя сервера
+            server_script: Путь к скрипту сервера
+        
+        Returns:
+            True если подключение успешно
+        """
+        try:
+            server_params = StdioServerParameters(
+                command=sys.executable,
+                args=[server_script]
+            )
+            
+            # Создаём контекстный менеджер
+            server_cm = stdio_client(server_params)
+            
+            # Входим в контекст
+            read_stream, write_stream = await server_cm.__aenter__()
+            
+            # Создаём сессию
+            session = ClientSession(read_stream, write_stream)
+            await session.__aenter__()
+            await session.initialize()
+            
+            # Сохраняем всё
+            self._server_contexts[server_name] = server_cm
+            self._server_processes[server_name] = (read_stream, write_stream)
+            self.sessions[server_name] = session
+            
+            # Получаем список инструментов
+            tools_result = await session.list_tools()
+            server_tools = {}
+            for tool in tools_result.tools:
+                parameters = tool.inputSchema if tool.inputSchema else {"type": "object", "properties": {}}
+                # Добавляем префикс имени сервера к имени инструмента
+                prefixed_name = f"{server_name}__{tool.name}"
+                server_tools[prefixed_name] = {
+                    "type": "function",
+                    "function": {
+                        "name": prefixed_name,
+                        "description": tool.description or "",
+                        "parameters": parameters
+                    },
+                    "original_name": tool.name,
+                    "server": server_name
+                }
+            
+            self.tools[server_name] = server_tools
+            print(f"MCP сервер '{server_name}' подключен. Инструменты: {list(server_tools.keys())}")
+            return True
+        
+        except Exception as e:
+            print(f"Ошибка подключения к MCP серверу '{server_name}': {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def disconnect_all(self):
+        """Отключает все серверы."""
+        for server_name, session in list(self.sessions.items()):
+            try:
+                await session.__aexit__(None, None, None)
+            except Exception:
+                pass
+        
+        self.sessions.clear()
+        self.tools.clear()
+        self._server_contexts.clear()
+        self._server_processes.clear()
+    
+    def get_all_tools(self) -> List[Dict[str, Any]]:
+        """Возвращает список всех доступных инструментов от всех серверов."""
+        all_tools = []
+        for server_tools in self.tools.values():
+            for tool_info in server_tools.values():
+                # Возвращаем в формате OpenAI
+                all_tools.append({
+                    "type": tool_info["type"],
+                    "function": tool_info["function"]
+                })
+        return all_tools
+    
+    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        """
+        Вызывает инструмент на соответствующем сервере.
+        
+        Args:
+            tool_name: Имя инструмента (с префиксом сервера, например "pecom__calculate_cost")
+            arguments: Аргументы инструмента
+        
+        Returns:
+            Результат вызова
+        """
+        # Находим сервер по имени инструмента
+        server_name = None
+        original_tool_name = None
+        
+        for s_name, s_tools in self.tools.items():
+            if tool_name in s_tools:
+                server_name = s_name
+                original_tool_name = s_tools[tool_name]["original_name"]
+                break
+        
+        if server_name is None:
+            raise Exception(f"Неизвестный инструмент: {tool_name}")
+        
+        session = self.sessions.get(server_name)
+        if not session:
+            raise Exception(f"Сессия для сервера '{server_name}' не найдена")
+        
+        # Вызываем инструмент с оригинальным именем
+        result = await session.call_tool(original_tool_name, arguments)
+        
+        # Извлекаем текст из результата
+        result_text = ""
+        if hasattr(result, 'content'):
+            for content in result.content:
+                if hasattr(content, 'text'):
+                    result_text += content.text
+        
+        return result_text
+    
+    def is_available(self) -> bool:
+        """Проверяет, подключен ли хотя бы один сервер."""
+        return len(self.sessions) > 0
+
+
 class RoutePlannerAgent:
     """Агент для планирования маршрутов с MCP инструментами."""
     
@@ -76,88 +242,46 @@ class RoutePlannerAgent:
             timeout=120.0,
             max_retries=2
         )
-        self.mcp_session: Optional[ClientSession] = None
-        self.mcp_tools: List[Dict[str, Any]] = []
+        self.orchestrator = MCPOrchestrator()
         self.state = AgentState()
-        self._mcp_cm = None  # Контекстный менеджер MCP
     
     async def connect_mcp(self) -> bool:
         """
-        Подключается к MCP серверу.
+        Подключается к MCP серверам.
         
         Returns:
-            True если подключение успешно
+            True если подключение хотя бы одного сервера успешно
         """
-        try:
-            # Путь к MCP серверу
-            server_script = os.path.join(os.path.dirname(__file__), "mcp_server.py")
-            server_params = StdioServerParameters(
-                command=sys.executable,  # Используем текущий Python
-                args=[server_script]
-            )
-            
-            # Создаём контекстный менеджер
-            self._mcp_cm = stdio_client(server_params)
-            
-            # Входим в контекст
-            read_stream, write_stream = await self._mcp_cm.__aenter__()
-            
-            # Создаём сессию
-            self.mcp_session = ClientSession(read_stream, write_stream)
-            await self.mcp_session.__aenter__()
-            await self.mcp_session.initialize()
-            
-            # Получаем список доступных инструментов
-            tools_result = await self.mcp_session.list_tools()
-            self.mcp_tools = []
-            for tool in tools_result.tools:
-                # Преобразуем схему параметров в формат OpenAI
-                parameters = tool.inputSchema if tool.inputSchema else {"type": "object", "properties": {}}
-                self.mcp_tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "parameters": parameters
-                    }
-                })
-            
-            self.state.mcp_available = True
-            print(f"MCP подключено. Инструменты: {[t['function']['name'] for t in self.mcp_tools]}")
-            return True
+        current_dir = os.path.dirname(__file__)
         
-        except Exception as e:
-            print(f"Ошибка подключения к MCP: {e}")
-            import traceback
-            traceback.print_exc()
-            self.state.mcp_available = False
-            return False
+        # Подключаем основной сервер (yandex)
+        yandex_script = os.path.join(current_dir, "mcp_server.py")
+        yandex_success = await self.orchestrator.connect_server("yandex", yandex_script)
+        
+        # Подключаем сервер ПЭК
+        pecom_script = os.path.join(current_dir, "pecom_server.py")
+        pecom_success = await self.orchestrator.connect_server("pecom", pecom_script)
+        
+        self.state.mcp_available = self.orchestrator.is_available()
+        
+        if self.state.mcp_available:
+            all_tools = self.orchestrator.get_all_tools()
+            print(f"Всего доступно инструментов: {len(all_tools)}")
+            print(f"Инструменты: {[t['function']['name'] for t in all_tools]}")
+        
+        return self.state.mcp_available
     
     async def disconnect_mcp(self):
-        """Отключается от MCP сервера."""
+        """Отключается от всех MCP серверов."""
         self.state.mcp_available = False
-        
-        # Закрываем сессию
-        if self.mcp_session:
-            try:
-                await self.mcp_session.__aexit__(None, None, None)
-            except Exception:
-                pass
-            self.mcp_session = None
-        
-        # Не вызываем __aexit__ на контекстном менеджере, т.к. это вызывает
-        # cancel scope error при вызове из другого потока/задачи.
-        # Вместо этого просто обнуляем ссылку — процесс MCP сервера
-        # завершится сам при закрытии stdin или при завершении приложения.
-        self._mcp_cm = None
-        self.mcp_tools = []
+        await self.orchestrator.disconnect_all()
     
     async def call_mcp_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         """
-        Вызывает MCP инструмент.
+        Вызывает MCP инструмент через оркестратор.
         
         Args:
-            tool_name: Название инструмента
+            tool_name: Название инструмента (с префиксом сервера)
             arguments: Аргументы инструмента
         
         Returns:
@@ -170,16 +294,7 @@ class RoutePlannerAgent:
         )
         
         try:
-            if not self.mcp_session:
-                raise Exception("MCP сессия не инициализирована")
-            
-            result = await self.mcp_session.call_tool(tool_name, arguments)
-            # Извлекаем текст из результата
-            result_text = ""
-            if hasattr(result, 'content'):
-                for content in result.content:
-                    if hasattr(content, 'text'):
-                        result_text += content.text
+            result_text = await self.orchestrator.call_tool(tool_name, arguments)
             
             call_record.success = True
             call_record.result = result_text
@@ -211,12 +326,15 @@ class RoutePlannerAgent:
             *self.state.messages
         ]
         
+        # Получаем все инструменты от оркестратора
+        mcp_tools = self.orchestrator.get_all_tools() if self.state.mcp_available else []
+        
         try:
             # Первый запрос к LLM
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                tools=self.mcp_tools if self.state.mcp_available else None,
+                tools=mcp_tools if mcp_tools else None,
                 max_tokens=1024
             )
             
@@ -263,7 +381,7 @@ class RoutePlannerAgent:
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
-                    tools=self.mcp_tools if self.state.mcp_available else None,
+                    tools=mcp_tools if mcp_tools else None,
                     max_tokens=1024
                 )
                 assistant_message = response.choices[0].message

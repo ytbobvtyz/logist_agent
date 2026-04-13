@@ -334,6 +334,10 @@ async def find_optimal_route(coordinates_json: str) -> str:
         if "warning" in data:
             result["warning"] = data["warning"]
         
+        # Добавляем информацию о городе отправления для 3+ городов
+        if n >= 3:
+            result["starting_city"] = cities_data[0]["name"]
+        
         return json.dumps(result, ensure_ascii=False)
     
     except json.JSONDecodeError:
@@ -375,6 +379,11 @@ async def format_route_summary(route_json: str) -> str:
             lines.append("")
         
         lines.extend(["🗺️ Оптимальный маршрут:", ""])
+        
+        # Добавляем уведомление о городе отправления для 3+ городов
+        if len(route) >= 3 and "starting_city" in data:
+            lines.append(f"⚠️ В качестве города отправления использован первый город из списка - {data['starting_city']}")
+            lines.append("")
         
         # Маршрут стрелками
         route_str = " → ".join(route)
