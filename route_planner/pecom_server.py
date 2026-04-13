@@ -78,7 +78,7 @@ async def find_city_by_api(city_name: str) -> Optional[int]:
         ID города или None если не найден
     """
     try:
-        url = "http://calc.pecom.ru/bitrix/components/pecom/calc/ajax.php"
+        url = "https://calc.pecom.ru/bitrix/components/pecom/calc/ajax.php"
         # Попробуем найти город через autocomplete
         params = {
             "action": "getCity",
@@ -89,6 +89,7 @@ async def find_city_by_api(city_name: str) -> Optional[int]:
             response = await client.get(url, params=params, timeout=10.0)
             if response.status_code == 200:
                 data = response.json()
+                print("Response from PEK API:", data)
                 # API возвращает список вариантов
                 if isinstance(data, list) and len(data) > 0:
                     # Берём первый результат
@@ -106,151 +107,6 @@ def get_available_cities() -> list:
         display_name = name.capitalize()
         unique_cities.add(display_name)
     return sorted(list(unique_cities))
-
-
-# Типичные тарифы ПЭК (руб/кг) между крупными городами
-# На основе публичной информации о тарифах ПЭК
-PECOM_RATES = {
-    # Москва/СПБ -> другие города
-    ("москва", "санкт-петербург"): 18,
-    ("москва", "спб"): 18,
-    ("москва", "казань"): 22,
-    ("москва", "нижний новгород"): 20,
-    ("москва", "новосибирск"): 45,
-    ("москва", "екатеринбург"): 40,
-    ("москва", "ростов-на-дону"): 28,
-    ("москва", "ростов"): 28,
-    ("москва", "самара"): 26,
-    ("москва", "омск"): 48,
-    ("москва", "челябинск"): 42,
-    ("москва", "волгоград"): 30,
-    ("москва", "пермь"): 38,
-    ("москва", "уфа"): 35,
-    ("москва", "краснодар"): 32,
-    ("москва", "воронеж"): 22,
-    ("москва", "тюмень"): 45,
-    ("москва", "тольятти"): 26,
-    ("москва", "ижевск"): 30,
-    ("москва", "барнаул"): 55,
-    ("москва", "ульяновск"): 25,
-    ("москва", "иркутск"): 65,
-    ("москва", "хабаровск"): 85,
-    ("москва", "владивосток"): 90,
-    ("москва", "ярославль"): 18,
-    ("москва", "кемерово"): 50,
-    ("москва", "новокузнецк"): 52,
-    ("москва", "рязань"): 18,
-    ("москва", "липецк"): 20,
-    ("москва", "пенза"): 24,
-    ("москва", "киров"): 28,
-    ("москва", "чебоксары"): 24,
-    ("москва", "калининград"): 35,
-    ("москва", "сочи"): 38,
-    
-    # СПБ -> другие города
-    ("санкт-петербург", "москва"): 18,
-    ("спб", "москва"): 18,
-    ("санкт-петербург", "казань"): 26,
-    ("спб", "казань"): 26,
-    
-    # Казань -> другие города
-    ("казань", "москва"): 22,
-    ("казань", "санкт-петербург"): 26,
-    ("казань", "спб"): 26,
-}
-
-
-def get_rate(from_city: str, to_city: str) -> float:
-    """
-    Получает тариф за кг между городами.
-    Если прямой тариф не найден, использует среднее значение.
-    """
-    from_norm = from_city.lower().strip()
-    to_norm = to_city.lower().strip()
-    
-    # Ищем прямой тариф
-    rate = PECOM_RATES.get((from_norm, to_norm))
-    if rate:
-        return rate
-    
-    # Ищем обратный тариф
-    rate = PECOM_RATES.get((to_norm, from_norm))
-    if rate:
-        return rate
-    
-    # Если нет точного тарифа, рассчитываем на основе "расстояния" между ID городов
-    from_id = get_city_id(from_city) or 446  # По умолчанию Москва
-    to_id = get_city_id(to_city) or 446
-    
-    # Базовый тариф 25 руб/кг + корректировка на расстояние
-    distance_factor = abs(from_id - to_id) / 1000
-    base_rate = 25 + (distance_factor * 20)
-    
-    # Ограничиваем разумными пределами (15-100 руб/кг)
-    return max(15, min(100, base_rate))
-
-
-def generate_demo_price(from_city: str, to_city: str, weight_kg: float, volume_m3: float, length_m: float = 0.5, width_m: float = 0.5, height_m: float = 0.4) -> str:
-    """
-    Генерирует демо-цену на основе реальных тарифов ПЭК.
-    Используется когда публичный API ПЭК недоступен.
-    
-    Args:
-        from_city: Город отправления
-        to_city: Город назначения
-        weight_kg: Вес в кг
-        volume_m3: Объём в м³
-        length_m: Длина в метрах
-        width_m: Ширина в метрах
-        height_m: Высота в метрах
-    
-    Returns:
-        JSON с демо-результатом
-    """
-    # Получаем тариф за кг
-    rate_per_kg = get_rate(from_city, to_city)
-    
-    # Минимальная стоимость отправки (забор + доставка до терминала)
-    min_cost = 650
-    
-    # Расчёт по весу
-    weight_cost = weight_kg * rate_per_kg
-    
-    # Расчёт по объёму (плотность 250 кг/м³ - стандарт для ПЭК)
-    volume_weight = volume_m3 * 250
-    volume_cost = volume_weight * rate_per_kg
-    
-    # Берём максимум из весового и объёмного расчёта + минимальная стоимость
-    cost = max(min_cost, weight_cost, volume_cost)
-    
-    # Округляем до рублей
-    cost = int(cost)
-    
-    # Формируем описание расчёта
-    calc_details = f"тариф {rate_per_kg} ₽/кг"
-    if volume_cost > weight_cost:
-        calc_details += f", объёмный вес {volume_weight:.1f} кг"
-    
-    result = {
-        "success": True,
-        "from_city": from_city,
-        "to_city": to_city,
-        "weight_kg": weight_kg,
-        "dimensions": {
-            "length_m": length_m,
-            "width_m": width_m,
-            "height_m": height_m,
-            "volume_m3": round(volume_m3, 4)
-        },
-        "cost": cost,
-        "tariff": "Авто",
-        "rate_per_kg": rate_per_kg,
-        "calculation_details": calc_details,
-        "message": f"Стоимость доставки {from_city} → {to_city}: {cost} ₽ ({calc_details})",
-        "note": "Расчёт выполнен по справочным тарифам ПЭК"
-    }
-    
-    return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -306,45 +162,63 @@ async def calculate_cost(
     volume = length_m * width_m * height_m
     
     # Формируем URL запроса к API ПЭК
-    base_url = "http://calc.pecom.ru/bitrix/components/pecom/calc/ajax.php"
+    base_url = "https://calc.pecom.ru/bitrix/components/pecom/calc/ajax.php"
     
-    # Параметры запроса
-    params = {
-        "take[town]": from_city_id,
-        "deliver[town]": to_city_id,
-        "places[0][]": length_m,
-        "places[1][]": width_m,
-        "places[2][]": height_m,
-        "places[3][]": volume,
-        "places[4][]": weight_kg,
-        "places[5][]": 0,  # негабарит
-        "places[6][]": 0,  # упаковка
-    }
+    # Параметры запроса в правильном формате
+    params = [
+        ('take[town]', from_city_id),
+        ('deliver[town]', to_city_id),
+        ('places[0][]', length_m),
+        ('places[0][]', width_m),
+        ('places[0][]', height_m),
+        ('places[0][]', volume),
+        ('places[0][]', weight_kg),
+        ('places[0][]', 0),  # негабарит
+        ('places[0][]', 0),  # упаковка
+    ]
     
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(base_url, params=params, timeout=15.0)
             response.raise_for_status()
+            # Ответ может быть некорректным JSON, если что-то пошло не так
+            # Например, может вернуться HTML страница с ошибкой.
+            # Поэтому сначала проверяем, что это JSON
+            if 'application/json' not in response.headers.get('content-type', ''):
+                print(f"Non-JSON response from PEK API: {response.text}")
+                raise httpx.RequestError(f"API ПЭК вернул не JSON ответ (статус: {response.status_code}). Тело ответа: {response.text[:500]}")
+
             data = response.json()
+
     except httpx.HTTPStatusError as e:
-        # В случае ошибки HTTP используем демо-режим с примерными ценами
-        print(f"⚠️ API ПЭК вернул ошибку HTTP {e.response.status_code}, используем демо-режим")
-        return generate_demo_price(from_city, to_city, weight_kg, volume)
+        return json.dumps({
+            "success": False,
+            "error": f"API ПЭК вернул ошибку HTTP: {e.response.status_code}"
+        }, ensure_ascii=False)
     except httpx.RequestError as e:
-        # В случае недоступности API используем демо-режим
-        print(f"⚠️ API ПЭК недоступен ({e}), используем демо-режим")
-        return generate_demo_price(from_city, to_city, weight_kg, volume)
+        return json.dumps({
+            "success": False,
+            "error": f"Ошибка сети при запросе к API ПЭК: {e}"
+        }, ensure_ascii=False)
+    except json.JSONDecodeError:
+        return json.dumps({
+            "success": False,
+            "error": "Не удалось декодировать JSON из ответа API ПЭК."
+        }, ensure_ascii=False)
     except Exception as e:
-        # В случае любой другой ошибки используем демо-режим
-        print(f"⚠️ Ошибка при запросе к API ПЭК ({e}), используем демо-режим")
-        return generate_demo_price(from_city, to_city, weight_kg, volume)
+        return json.dumps({
+            "success": False,
+            "error": f"Неизвестная ошибка при запросе к API ПЭК: {e}"
+        }, ensure_ascii=False)
     
     # Парсим ответ
     if data.get("status") != "success":
-        # API вернул неуспешный статус - используем демо-режим
-        print(f"⚠️ API ПЭК вернул неуспешный статус, используем демо-режим")
-        return generate_demo_price(from_city, to_city, weight_kg, volume)
-    
+        error_message = data.get("message", "API ПЭК вернул неуспешный статус без дополнительной информации.")
+        return json.dumps({
+            "success": False,
+            "error": error_message
+        }, ensure_ascii=False)
+
     # Ищем тариф "Авто"
     methods = data.get("methods", [])
     auto_price = None
@@ -353,19 +227,12 @@ async def calculate_cost(
         if method.get("name") == "Авто":
             auto_price = method.get("price")
             break
-    
-    # Если нет тарифа Авто, ищем первый доступный тариф
-    if auto_price is None and methods:
-        # Берём первый доступный тариф
-        auto_price = methods[0].get("price")
-        tariff_name = methods[0].get("name", "Неизвестно")
-    else:
-        tariff_name = "Авто"
-    
+            
     if auto_price is None:
-        # Не удалось получить тариф - используем демо-режим
-        print(f"⚠️ Не удалось получить тариф из API, используем демо-режим")
-        return generate_demo_price(from_city, to_city, weight_kg, volume)
+        return json.dumps({
+            "success": False,
+            "error": "В ответе API ПЭК не найден тариф 'Авто'"
+        }, ensure_ascii=False)
     
     # Формируем успешный ответ
     result = {
@@ -373,19 +240,32 @@ async def calculate_cost(
         "from_city": from_city,
         "to_city": to_city,
         "weight_kg": weight_kg,
-        "dimensions": {
-            "length_m": length_m,
-            "width_m": width_m,
-            "height_m": height_m,
-            "volume_m3": round(volume, 4)
-        },
         "cost": int(auto_price),
-        "tariff": tariff_name,
-        "message": f"Стоимость доставки {from_city} → {to_city}: {int(auto_price)} ₽ (тариф: {tariff_name})"
+        "message": f"Стоимость доставки {from_city} → {to_city}: {int(auto_price)} ₽"
     }
     
     return json.dumps(result, ensure_ascii=False)
 
 
 if __name__ == "__main__":
-    mcp.run()
+    import asyncio
+
+    async def main():
+        # Тест 1: Валидный запрос
+        print("--- Тест 1: Москва -> Казань (10 кг) ---")
+        result1_json = await calculate_cost(from_city="Москва", to_city="Казань", weight_kg=10)
+        print(json.dumps(json.loads(result1_json), indent=2, ensure_ascii=False))
+        
+        # Тест 2: Город не найден
+        print("\n--- Тест 2: Москва -> НесуществующийГород ---")
+        result2_json = await calculate_cost(from_city="Москва", to_city="НесуществующийГород")
+        print(json.dumps(json.loads(result2_json), indent=2, ensure_ascii=False))
+
+        # Тест 3: Запрос с дефолтными параметрами
+        print("\n--- Тест 3: Санкт-Петербург -> Уфа (дефолтный вес) ---")
+        result3_json = await calculate_cost(from_city="санкт-петербург", to_city="уфа")
+        print(json.dumps(json.loads(result3_json), indent=2, ensure_ascii=False))
+
+
+    # Запускаем тестовую асинхронную функцию
+    asyncio.run(main())
