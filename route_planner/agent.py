@@ -8,7 +8,7 @@ import os
 import sys
 import asyncio
 import anyio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -32,6 +32,7 @@ SYSTEM_PROMPT = """Ты агент-планировщик маршрутов.
 #### Сервер yandex (геокодирование и маршруты):
 - geocode_batch(cities=[...]) - получает координаты городов
 - find_optimal_route(coordinates_json=...) - находит оптимальный порядок обхода точек
+- calculate_distance(city1, city2) - рассчитывает расстояние между двумя городами
 - format_route_summary(route_json=...) - форматирует результат в читаемый вид
 
 #### Сервер pecom (доставка ПЭК):
@@ -41,6 +42,10 @@ SYSTEM_PROMPT = """Ты агент-планировщик маршрутов.
   Вес по умолчанию: 50 кг, габариты: 0.5×0.5×0.4 м
 
 ### Флоу работы:
+
+#### Расчет расстояния между двумя городами:
+1. Вызови calculate_distance(city1="Город1", city2="Город2")
+2. Ответь пользователю результатом расчета
 
 #### Простой поиск маршрута:
 1. Вызови geocode_batch(cities=[...])
@@ -80,7 +85,7 @@ class MCPToolCall:
 @dataclass
 class AgentState:
     """Состояние агента."""
-    messages: List[Dict[str, str]] = field(default_factory=list)
+    messages: List[Dict[str, Any]] = field(default_factory=list)
     mcp_calls: List[MCPToolCall] = field(default_factory=list)
     mcp_available: bool = False
 
@@ -174,9 +179,14 @@ class MCPOrchestrator:
         for server_tools in self.tools.values():
             for tool_info in server_tools.values():
                 # Возвращаем в формате OpenAI
+                function_info = tool_info["function"]
                 all_tools.append({
-                    "type": tool_info["type"],
-                    "function": tool_info["function"]
+                    "type": "function",
+                    "function": {
+                        "name": function_info["name"],
+                        "description": function_info["description"],
+                        "parameters": function_info["parameters"]
+                    }
                 })
         return all_tools
     
@@ -209,14 +219,23 @@ class MCPOrchestrator:
             raise Exception(f"Сессия для сервера '{server_name}' не найдена")
         
         # Вызываем инструмент с оригинальным именем
-        result = await session.call_tool(original_tool_name, arguments)
+        result = await session.call_tool(str(original_tool_name), arguments)
         
         # Извлекаем текст из результата
         result_text = ""
         if hasattr(result, 'content'):
             for content in result.content:
                 if hasattr(content, 'text'):
-                    result_text += content.text
+                    result_text += str(content.text)
+                elif isinstance(content, str):
+                    result_text += content
+                else:
+                    # Пробуем преобразовать в строку
+                    result_text += str(content)
+        elif isinstance(result, str):
+            result_text = result
+        else:
+            result_text = str(result)
         
         return result_text
     
@@ -274,7 +293,11 @@ class RoutePlannerAgent:
     async def disconnect_mcp(self):
         """Отключается от всех MCP серверов."""
         self.state.mcp_available = False
-        await self.orchestrator.disconnect_all()
+        try:
+            await self.orchestrator.disconnect_all()
+        except Exception as e:
+            print(f"⚠️ Ошибка при отключении MCP: {e}")
+            # Не пробрасываем ошибку дальше, чтобы не падать
     
     async def call_mcp_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         """
@@ -340,8 +363,13 @@ class RoutePlannerAgent:
             
             assistant_message = response.choices[0].message
             
-            # Обрабатываем вызовы инструментов
-            while assistant_message.tool_calls:
+            # Обрабатываем вызовы инструментов с ограничением по количеству итераций
+            max_iterations = 10  # Максимальное количество итераций для предотвращения бесконечного цикла
+            iteration_count = 0
+            
+            while assistant_message.tool_calls and iteration_count < max_iterations:
+                iteration_count += 1
+                
                 messages.append({
                     "role": "assistant",
                     "content": assistant_message.content,
@@ -359,8 +387,15 @@ class RoutePlannerAgent:
                 })
                 
                 for tool_call in assistant_message.tool_calls:
-                    tool_name = tool_call.function.name
-                    arguments = json.loads(tool_call.function.arguments)
+                    # Используем правильный доступ к данным инструмента
+                    if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'name'):
+                        tool_name = tool_call.function.name
+                        arguments = json.loads(tool_call.function.arguments)
+                    else:
+                        # Альтернативный способ доступа к данным
+                        tool_data = getattr(tool_call, 'function', {})
+                        tool_name = tool_data.get('name', '')
+                        arguments = json.loads(tool_data.get('arguments', '{}'))
                     
                     if callback:
                         await callback(f"🔧 Вызываю {tool_name}...")
@@ -386,6 +421,12 @@ class RoutePlannerAgent:
                 )
                 assistant_message = response.choices[0].message
             
+            # Если достигнут лимит итераций, но всё ещё есть вызовы инструментов
+            if iteration_count >= max_iterations and assistant_message.tool_calls:
+                final_response = "❌ Превышено максимальное количество итераций. Возможно, проблема с интерпретацией запроса."
+                self.state.messages.append({"role": "assistant", "content": final_response})
+                return final_response
+            
             # Финальный ответ
             final_response = assistant_message.content or "Не удалось получить ответ"
             
@@ -401,6 +442,13 @@ class RoutePlannerAgent:
         
         except Exception as e:
             error_msg = f"❌ Ошибка агента: {e}"
+            # Добавляем информацию о вызовах инструментов для отладки
+            calls_info = f"\n📊 Вызовы инструментов: {len(self.state.mcp_calls)}"
+            for i, call in enumerate(self.state.mcp_calls):
+                status = "✅" if call.success else "❌"
+                calls_info += f"\n  {i+1}. {call.tool_name}: {status}"
+            
+            error_msg += calls_info
             self.state.messages.append({"role": "assistant", "content": error_msg})
             return error_msg
     

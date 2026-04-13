@@ -347,6 +347,47 @@ async def find_optimal_route(coordinates_json: str) -> str:
 
 
 @mcp.tool()
+async def calculate_distance(city1: str, city2: str) -> str:
+    """
+    Рассчитывает расстояние между двумя городами.
+    
+    Args:
+        city1: Первый город
+        city2: Второй город
+    
+    Returns:
+        JSON с расстоянием между городами
+    """
+    try:
+        # Получаем координаты обоих городов
+        cities_data = []
+        
+        for city in [city1, city2]:
+            result = await geocode_city(city)
+            if "error" in result:
+                return json.dumps({"error": result["error"]}, ensure_ascii=False)
+            cities_data.append(result)
+        
+        # Рассчитываем расстояние между городами
+        distance = haversine(
+            cities_data[0]["lat"], cities_data[0]["lon"],
+            cities_data[1]["lat"], cities_data[1]["lon"]
+        )
+        
+        result = {
+            "from_city": city1,
+            "to_city": city2,
+            "distance_km": round(distance, 1),
+            "message": f"Расстояние между {city1} и {city2}: {round(distance, 1)} км"
+        }
+        
+        return json.dumps(result, ensure_ascii=False)
+    
+    except Exception as e:
+        return json.dumps({"error": f"Ошибка расчета расстояния: {e}"}, ensure_ascii=False)
+
+
+@mcp.tool()
 async def format_route_summary(route_json: str) -> str:
     """
     Форматирует результат в читаемый вид.
