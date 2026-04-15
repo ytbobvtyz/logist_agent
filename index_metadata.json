@@ -1,0 +1,17 @@
+{
+  "strategies": {
+    "fixed": {
+      "chunk_count": 230,
+      "avg_size": 486.88695652173914,
+      "time": 2.9567136764526367
+    },
+    "sentence": {
+      "chunk_count": 279,
+      "avg_size": 363.8817204301075,
+      "time": 3.9353315830230713
+    }
+  },
+  "vocab_size": 2353,
+  "total_documents": 5,
+  "test_queries_results": "см. вывод в консоли"
+}

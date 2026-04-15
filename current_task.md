@@ -3,76 +3,285 @@
 3. FIX 3: Алгоритм нахождения оптимальной дистанции работает правильно, но с одним ньюансом - он берет в качестве города отправления первый из списка. Поэтому, если рассчитан маршрут для 3 и более точек и пользователь явно не указал город отправления, то необходимо добавить в промпт вывода информацию, что "в качестве города отправления использован первый город из списка - ***" - DONE
 4. FEATURE 1: Реализовать дополнительный MCP сервер для работы с api pecom.ru. Добавить агенту способность получать стоимость перевозки ООО "ПЭК" - DONE
 
-5. FEATURE 2: реализовать RAG. - DONE
-## Задача: Индексация документов перевозчиков (Day 21)
+5. FEATURE 2: реализовать индексирование RAG. (TF-IDF-indexer.py) - DONE
+6. FEATURE 3: реализовать тестовый скрипт для анализа эффективности работы агента с rag и без rag
 
-### Цель
-Создать локальный индекс для поиска по документам перевозчиков (ПЭК, СДЭК, Почта России) с эмбеддингами.
+📋 ТЕХНИЧЕСКОЕ ЗАДАНИЕ: Внедрение RAG в логист-агента
+Контекст
+В проекте logist_agent уже реализован:
 
-### Что уже есть
-- Папка `data/carriers/` с текстовыми файлами (pecom.txt, cdek.txt, post_russia.txt)
+Индексатор документов (indexer.py) с FAISS + TF-IDF
 
-### Что реализовано
+База метаданных (metadata.db) с чанками документов
 
-✅ **Создан скрипт `indexer.py`** с полной функциональностью RAG системы:
+Документы в data/carriers/ (постановление, ПЭК, СДЭК, Почта России, API docs)
 
-#### 1. Загрузка документов
-- Прочитаны все .txt файлы из `data/carriers/` (5 файлов)
-- Сохранены метаданные: имя файла, путь
+Цель
+Добавить в агента два режима работы:
 
-#### 2. Чанкинг (разбиение)
-Реализованы **две стратегии** для сравнения:
+Без RAG — прямой вызов LLM (как сейчас)
 
-| Стратегия | Параметры |
-|-----------|-----------|
-| Фиксированный размер | chunk_size=500, overlap=50 |
-| По предложениям | split по ". " "!\n" "?\n" |
+С RAG — поиск по документам → подстановка в промпт → ответ с указанием источника
 
-#### 3. Эмбеддинги
-- Использована модель `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
-- Модель легковесная, работает на CPU
-- Преобразованы все чанки в векторы
+Задача 1: Создать файл rag_retriever.py
+python
+# rag_retriever.py
+# Назначение: поиск релевантных чанков в индексе
 
-#### 4. Сохранение индекса
-- **FAISS** — для быстрого поиска векторов
-- **SQLite** — для хранения метаданных (текст чанка, имя файла, стратегия)
+class RAGRetriever:
+    def __init__(self, index_path: str = "faiss_index", db_path: str = "metadata.db"):
+        """Загружает FAISS индекс и векторизатор"""
+        # Загрузить TF-IDF векторизатор из pickle
+        # Загрузить FAISS индекс
+        # Подключиться к SQLite
+        
+    def search(self, query: str, top_k: int = 3) -> List[Dict]:
+        """
+        Ищет топ-k релевантных чанков
+        
+        Returns:
+            [
+                {
+                    "text": "текст чанка",
+                    "filename": "pecom.txt",
+                    "score": 0.85
+                }
+            ]
+        """
+        # 1. Преобразовать query в вектор через тот же векторизатор
+        # 2. Поиск в FAISS
+        # 3. Получить метаданные из SQLite по индексам
+        # 4. Вернуть список с текстом, filename, score
+Задача 2: Модифицировать agent.py
+Добавить:
 
-#### 5. Поиск
-Функция `search(query, strategy="fixed", top_k=3)`:
-- Превращает вопрос пользователя в вектор
-- Ищет ближайшие чанки в FAISS
-- Возвращает текст чанков + метаданные
+python
+class LogistAgent:
+    def __init__(self):
+        # ... существующий код ...
+        self.rag_enabled = False  # переключатель режима
+        self.retriever = RAGRetriever()  # если индекс существует
+    
+    def ask_without_rag(self, user_input: str) -> str:
+        """Режим без RAG (как сейчас работает)"""
+        # существующая логика
+        
+    def ask_with_rag(self, user_input: str) -> str:
+        """Режим с RAG: поиск → объединение → LLM"""
+        # 1. Поиск релевантных чанков
+        chunks = self.retriever.search(user_input, top_k=3)
+        
+        # 2. Объединение (строим расширенный промпт)
+        prompt = self._build_rag_prompt(user_input, chunks)
+        
+        # 3. Вызов LLM с этим промптом
+        response = self.client.chat.completions.create(...)
+        
+        return response
+    
+    def ask(self, user_input: str) -> str:
+        """Главный метод с выбором режима"""
+        if self.rag_enabled:
+            return self.ask_with_rag(user_input)
+        else:
+            return self.ask_without_rag(user_input)
+    
+    def _build_rag_prompt(self, query: str, chunks: List[Dict]) -> str:
+        """Объединяет чанки с вопросом"""
+        context = "\n".join([
+            f"📄 [{chunk['filename']}] {chunk['text']}"
+            for chunk in chunks
+        ])
+        
+        return f"""
+Ты помощник-логист.
 
-#### 6. Сравнение стратегий
-Выводится таблица:
-| Стратегия | Кол-во чанков | Средний размер | Время индексации |
-|-----------+---------------+----------------+------------------|
-| fixed | 230 | 488 символов | 3.2 сек |
-| sentence | 234 | 435 символов | 3.2 сек |
+## Инструкция:
+- Если информация есть в документах ниже — используй её и отметь 📄
+- Если информации нет — используй свои знания и отметь 💡
+- Всегда указывай источник
 
-### Запуск
-```bash
-python indexer.py
-```
+## Документы с релевантной информацией:
+{context}
 
-### Результат
-✅ Создан файл `faiss_index` (бинарный индекс)
-✅ Создан файл `metadata.db` (SQLite)
-✅ В консоли выводится сравнение стратегий
-✅ При поиске "стоимость доставки до 50 кг" находятся чанки из pecom.txt
+## Вопрос пользователя:
+{query}
 
-### Зависимости
-```bash
-pip install sentence-transformers faiss-cpu sqlite3
-```
+## Твой ответ:
+"""
+Задача 3: Добавить переключатель в app.py (Gradio)
+python
+# app.py — добавить в боковую панель
 
-### Тестирование
-После индексации выполнен поиск по фразе "сколько стоит отправить груз 30 кг из Москвы в Питер"
+with gr.Row():
+    rag_toggle = gr.Checkbox(
+        label="🔍 Использовать RAG (поиск по документам)",
+        value=False,
+        info="Включает поиск в документах перевозчиков"
+    )
+    
+    rag_toggle.change(
+        fn=lambda x: setattr(agent, 'rag_enabled', x),
+        inputs=rag_toggle,
+        outputs=[]
+    )
+Задача 4: Создать файл test_rag.py — CLI тестирование 10 вопросов агентом
+python
+#!/usr/bin/env python3
+"""
+Тестирование RAG на 10 контрольных вопросах
+Сравнение ответов с RAG и без RAG
+"""
 
-✅ Найдены релевантные чанки из документов перевозчиков
+import json
+from agent import LogistAgent
+from rag_retriever import RAGRetriever
 
-### Особенности реализации
-- Всё работает локально, без API
-- Код самодостаточный (один файл)
-- Добавлены подробные комментарии на русском языке
-- Создана документация в файле `RAG_DOCUMENTATION.md`
+# 10 контрольных вопросов (из обсуждения)
+TEST_QUESTIONS = [
+    {
+        "id": 1,
+        "question": "Сколько стоит доставка груза 50 кг из Москвы в Санкт-Петербург у ПЭК?",
+        "expected_keywords": ["2450", "ПЭК", "Москва", "Санкт-Петербург"],
+        "source_expected": "pecom.txt"
+    },
+    {
+        "id": 2,
+        "question": "Какой максимальный вес принимает СДЭК для посылки?",
+        "expected_keywords": ["30", "кг"],
+        "source_expected": "cdek.txt"
+    },
+    {
+        "id": 3,
+        "question": "Сколько стоит отправить посылку весом 1 кг Почтой России?",
+        "expected_keywords": ["500", "руб"],
+        "source_expected": "post_russia.txt"
+    },
+    {
+        "id": 4,
+        "question": "Какая стоимость доставки ПЭК из Москвы в Казань для груза 100 кг?",
+        "expected_keywords": ["5100", "ПЭК"],
+        "source_expected": "pecom.txt"
+    },
+    {
+        "id": 5,
+        "question": "Какой URL у публичного API ПЭК для расчёта стоимости?",
+        "expected_keywords": ["calc.pecom.ru", "ajax.php"],
+        "source_expected": "pecom_api_doc.txt"
+    },
+    {
+        "id": 6,
+        "question": "Как передать вес груза в API ПЭК?",
+        "expected_keywords": ["places[0][4]", "вес", "weight"],
+        "source_expected": "pecom_api_doc.txt"
+    },
+    {
+        "id": 7,
+        "question": "Какой формат ответа возвращает API ПЭК?",
+        "expected_keywords": ["JSON", "methods", "price"],
+        "source_expected": "pecom_api_doc.txt"
+    },
+    {
+        "id": 8,
+        "question": "Какие обязанности у фрахтователя?",
+        "expected_keywords": ["оплатить", "принять", "груз"],
+        "source_expected": "postanovlenie.txt"
+    },
+    {
+        "id": 9,
+        "question": "Что такое фрахтовщик по закону?",
+        "expected_keywords": ["перевозчик", "экспедитор"],
+        "source_expected": "postanovlenie.txt"
+    },
+    {
+        "id": 10,
+        "question": "Что такое логистика?",
+        "expected_keywords": ["управление", "потоками", "перевозка"],
+        "source_expected": None  # этот вопрос без RAG
+    }
+]
+
+def evaluate_answer(answer: str, expected_keywords: List[str]) -> dict:
+    """Оценивает, содержит ли ответ ожидаемые ключевые слова"""
+    found = [kw for kw in expected_keywords if kw.lower() in answer.lower()]
+    return {
+        "found_keywords": found,
+        "missing_keywords": [kw for kw in expected_keywords if kw.lower() not in answer.lower()],
+        "score": len(found) / len(expected_keywords) if expected_keywords else 1.0
+    }
+
+def main():
+    print("="*60)
+    print("🔍 ТЕСТИРОВАНИЕ RAG: 10 КОНТРОЛЬНЫХ ВОПРОСОВ")
+    print("="*60)
+    
+    agent = LogistAgent()
+    results = []
+    
+    for test in TEST_QUESTIONS:
+        print(f"\n📌 Вопрос {test['id']}: {test['question']}")
+        print("-"*40)
+        
+        # Ответ без RAG
+        agent.rag_enabled = False
+        answer_without = agent.ask(test['question'])
+        
+        # Ответ с RAG
+        agent.rag_enabled = True
+        answer_with = agent.ask(test['question'])
+        
+        # Оценка
+        eval_without = evaluate_answer(answer_without, test['expected_keywords'])
+        eval_with = evaluate_answer(answer_with, test['expected_keywords'])
+        
+        results.append({
+            "id": test['id'],
+            "question": test['question'],
+            "answer_without_rag": answer_without,
+            "answer_with_rag": answer_with,
+            "score_without": eval_without['score'],
+            "score_with": eval_with['score'],
+            "source_expected": test['source_expected']
+        })
+        
+        print(f"\n  ❌ Без RAG (score: {eval_without['score']:.0%}):")
+        print(f"     {answer_without[:200]}...")
+        print(f"\n  ✅ С RAG (score: {eval_with['score']:.0%}):")
+        print(f"     {answer_with[:200]}...")
+    
+    # Итоговая таблица
+    print("\n" + "="*60)
+    print("📊 ИТОГОВОЕ СРАВНЕНИЕ")
+    print("="*60)
+    print(f"{'ID':<4} {'Вопрос (первые 30 символов)':<35} {'Без RAG':<8} {'С RAG':<8}")
+    print("-"*60)
+    
+    for r in results:
+        question_short = r['question'][:30] + "..."
+        print(f"{r['id']:<4} {question_short:<35} {r['score_without']*100:>5.0f}%    {r['score_with']*100:>5.0f}%")
+    
+    # Сохраняем результаты
+    with open("rag_test_results.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    
+    print(f"\n✅ Результаты сохранены в rag_test_results.json")
+
+if __name__ == "__main__":
+    main()
+Структура результата
+text
+logist_agent/
+├── indexer.py              # уже есть (индексация)
+├── metadata.db             # уже есть (база чанков)
+├── faiss_index             # уже есть (индекс векторов)
+├── rag_retriever.py        # НОВЫЙ (поиск)
+├── route_planner/agent.py                # ИЗМЕНЁН (два режима)
+├── route_planner/app.py                  # ИЗМЕНЁН (переключатель)
+├── test_rag.py             # НОВЫЙ (тестирование 10 вопросов)
+└── rag_test_results.json   # НОВЫЙ (результаты)
+✅ Итог
+Что	Где
+Поиск чанков	rag_retriever.py
+Два режима агента	agent.py
+Переключатель в UI	app.py
+Тест 10 вопросов	test_rag.py
