@@ -153,7 +153,7 @@ class DeepSeekAgent:
                 temperature=0.1
             )
             
-            answer = response.choices[0].message.content
+            answer = response.choices[0].message.content or "Не удалось получить ответ"
             response_time = time.time() - start_time
             
             return answer, response_time
@@ -183,7 +183,7 @@ class DeepSeekAgent:
                 temperature=0.1
             )
             
-            answer = response.choices[0].message.content
+            answer = response.choices[0].message.content or "Не удалось получить ответ"
             response_time = time.time() - start_time
             
             return answer, response_time, chunks
@@ -227,15 +227,34 @@ class DeepSeekAgent:
 # 3. ФУНКЦИИ ОЦЕНКИ И АНАЛИЗА
 # ============================================================
 
+def extract_root(word: str) -> str:
+    """Извлекает корень слова для русского языка."""
+    # Простая эвристика для извлечения корней русских слов
+    # Убираем распространенные окончания
+    endings = ['тель', 'щик', 'ник', 'ец', 'ок', 'ек', 'ик', 'ка', 'ко', 'ая', 'ий', 'ый', 'ой']
+    
+    # Для длинных слов пробуем найти корень
+    if len(word) > 4:
+        for ending in endings:
+            if word.endswith(ending):
+                return word[:-len(ending)]
+    
+    # Если слово короткое или не найдено окончание, возвращаем как есть
+    return word
+
 def evaluate_answer(answer: str, expected_keywords: List[str]) -> Dict:
-    """Оценивает ответ по наличию ключевых слов."""
+    """Оценивает ответ по наличию ключевых слов с учетом корней."""
     answer_lower = answer.lower()
     
     found = []
     missing = []
     
     for kw in expected_keywords:
-        if kw.lower() in answer_lower:
+        kw_lower = kw.lower()
+        kw_root = extract_root(kw_lower)
+        
+        # Проверяем полное слово и корень
+        if kw_lower in answer_lower or kw_root in answer_lower:
             found.append(kw)
         else:
             missing.append(kw)
@@ -402,7 +421,48 @@ def run_deepseek_rag_test():
     print(f"\n⏱️  ПРОИЗВОДИТЕЛЬНОСТЬ:")
     print(f"   Среднее время без RAG: {avg_time_without:.2f} сек")
     print(f"   Среднее время с RAG:   {avg_time_with:.2f} сек")
-    print(f"   Увеличение времени:    {time_increase:+.2f} сек")
+    print(f"   Изменение времени:     {time_increase:+.2f} сек")
+    
+    # Расчет процентного изменения времени
+    if avg_time_without > 0:
+        time_change_pct = ((avg_time_without - avg_time_with) / avg_time_without) * 100
+        print(f"   Изменение времени:     {time_change_pct:+.1f}%")
+    
+    # Анализ эффективности RAG
+    print(f"\n🔍 АНАЛИЗ ЭФФЕКТИВНОСТИ RAG:")
+    
+    # Определяем тип эффективности
+    if improvement > 0 and time_increase < 0:
+        # RAG быстрее и точнее
+        print("   ✅ RAG БЫСТРЕЕ И ТОЧНЕЕ")
+        print("      RAG демонстрирует оптимальную эффективность - улучшает точность ответов")
+        print("      и сокращает время ответа. Рекомендуется к использованию.")
+    elif improvement > 0 and time_increase >= 0:
+        # RAG точнее, но медленнее
+        print("   ⚖️  RAG ТОЧНЕЕ, НО МЕДЛЕННЕЕ")
+        print("      RAG улучшает качество ответов, но требует больше времени.")
+        print("      Решение о использовании зависит от приоритетов: точность vs скорость.")
+    elif improvement <= 0 and time_increase < 0:
+        # RAG быстрее, но менее точен
+        print("   ⚡ RAG БЫСТРЕЕ, НО МЕНЕЕ ТОЧЕН")
+        print("      RAG ускоряет ответы, но может снижать точность.")
+        print("      Подходит для сценариев, где скорость важнее абсолютной точности.")
+    else:
+        # RAG медленнее и менее точен
+        print("   ❌ RAG МЕДЛЕННЕЕ И МЕНЕЕ ТОЧЕН")
+        print("      RAG ухудшает обе метрики. Требуется оптимизация системы.")
+    
+    # Дополнительная аналитика
+    print(f"\n📊 ДОПОЛНИТЕЛЬНАЯ АНАЛИТИКА:")
+    improved_questions = sum(1 for r in results if r['score_with'] > r['score_without'])
+    faster_questions = sum(1 for r in results if r['time_with_rag'] < r['time_without_rag'])
+    
+    print(f"   Вопросов с улучшением точности: {improved_questions}/{len(results)} ({improved_questions/len(results)*100:.1f}%)")
+    print(f"   Вопросов с ускорением ответа:   {faster_questions}/{len(results)} ({faster_questions/len(results)*100:.1f}%)")
+    
+    # Анализ по порогу улучшения
+    significant_improvement = sum(1 for r in results if r['score_with'] - r['score_without'] > 0.2)
+    print(f"   Значительное улучшение (>20%):  {significant_improvement}/{len(results)} вопросов")
     
     # Анализ по категориям
     categories = {}
@@ -418,15 +478,22 @@ def run_deepseek_rag_test():
         cat_score_with = sum(r['score_with'] for r in cat_results) / len(cat_results)
         print(f"   {cat}: {cat_score_without*100:.1f}% → {cat_score_with*100:.1f}% ({cat_score_with - cat_score_without:+.1f}%)")
     
-    # Детальная таблица
-    print(f"\n{'ID':<4} {'Категория':<12} {'Без RAG':<8} {'С RAG':<8} {'Улучшение':<10} {'Время RAG':<10}")
+    # Детальная таблица с временными метриками
+    print(f"\n{'ID':<4} {'Категория':<12} {'Без RAG':<8} {'С RAG':<8} {'Улучш.':<8} {'Время RAG':<10} {'Ускорение':<10}")
     print("-"*80)
     
     for r in results:
         improvement_pct = (r['score_with'] - r['score_without']) * 100
         improvement_str = f"{improvement_pct:+.1f}%"
         
-        print(f"{r['id']:<4} {r['category']:<12} {r['score_without']*100:>5.1f}%   {r['score_with']*100:>5.1f}%   {improvement_str:>8}   {r['time_with_rag']:>7.1f}с")
+        # Расчет ускорения/замедления в процентах
+        if r['time_without_rag'] > 0:
+            time_change_pct = ((r['time_without_rag'] - r['time_with_rag']) / r['time_without_rag']) * 100
+            time_change_str = f"{time_change_pct:+.1f}%"
+        else:
+            time_change_str = "N/A"
+        
+        print(f"{r['id']:<4} {r['category']:<12} {r['score_without']*100:>5.1f}%   {r['score_with']*100:>5.1f}%   {improvement_str:>7}   {r['time_with_rag']:>7.1f}с   {time_change_str:>9}")
     
     # ===== СОХРАНЕНИЕ РЕЗУЛЬТАТОВ =====
     output = {
