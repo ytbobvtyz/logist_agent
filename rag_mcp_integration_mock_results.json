@@ -1,0 +1,50 @@
+[
+  {
+    "id": 1,
+    "question": "Сколько стоит доставка груза 50 кг из Москвы в Санкт-Петербург у ПЭК?",
+    "expected_mode": "RAG",
+    "actual_mode": "KNOWLEDGE",
+    "match": false,
+    "response_preview": "💡 (RAG ничего не нашёл, использованы знания)\n\nТестовый ответ"
+  },
+  {
+    "id": 2,
+    "question": "Рассчитай расстояние между Москвой и Санкт-Петербургом",
+    "expected_mode": "MCP",
+    "actual_mode": "UNKNOWN",
+    "match": false,
+    "response_preview": "❌ Ошибка MCP обработки: 'Mock' object is not iterable\n📊 Вызовы инструментов: 0"
+  },
+  {
+    "id": 3,
+    "question": "Какие обязанности у фрахтователя?",
+    "expected_mode": "RAG",
+    "actual_mode": "KNOWLEDGE",
+    "match": false,
+    "response_preview": "💡 (RAG ничего не нашёл, использованы знания)\n\nТестовый ответ"
+  },
+  {
+    "id": 4,
+    "question": "Найди оптимальный маршрут Москва-Казань-Санкт-Петербург",
+    "expected_mode": "MCP",
+    "actual_mode": "UNKNOWN",
+    "match": false,
+    "response_preview": "❌ Ошибка MCP обработки: 'Mock' object is not iterable\n📊 Вызовы инструментов: 0"
+  },
+  {
+    "id": 5,
+    "question": "Что такое логистика?",
+    "expected_mode": "KNOWLEDGE",
+    "actual_mode": "UNKNOWN",
+    "match": false,
+    "response_preview": "❌ Ошибка MCP обработки: 'Mock' object is not iterable\n📊 Вызовы инструментов: 0"
+  },
+  {
+    "id": 6,
+    "question": "Какой максимальный вес принимает СДЭК для посылки?",
+    "expected_mode": "RAG",
+    "actual_mode": "KNOWLEDGE",
+    "match": false,
+    "response_preview": "💡 (RAG ничего не нашёл, использованы знания)\n\nТестовый ответ"
+  }
+]

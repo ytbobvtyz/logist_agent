@@ -1,0 +1,50 @@
+[
+  {
+    "id": 1,
+    "question": "Сколько стоит доставка груза 50 кг из Москвы в Санкт-Петербург у ПЭК?",
+    "expected_mode": "RAG",
+    "actual_mode": "RAG",
+    "match": true,
+    "should_use_rag": true
+  },
+  {
+    "id": 2,
+    "question": "Рассчитай расстояние между Москвой и Санкт-Петербургом",
+    "expected_mode": "MCP",
+    "actual_mode": "MCP/KNOWLEDGE",
+    "match": true,
+    "should_use_rag": false
+  },
+  {
+    "id": 3,
+    "question": "Какие обязанности у фрахтователя?",
+    "expected_mode": "RAG",
+    "actual_mode": "RAG",
+    "match": true,
+    "should_use_rag": true
+  },
+  {
+    "id": 4,
+    "question": "Найди оптимальный маршрут Москва-Казань-Санкт-Петербург",
+    "expected_mode": "MCP",
+    "actual_mode": "MCP/KNOWLEDGE",
+    "match": true,
+    "should_use_rag": false
+  },
+  {
+    "id": 5,
+    "question": "Что такое логистика?",
+    "expected_mode": "KNOWLEDGE",
+    "actual_mode": "MCP/KNOWLEDGE",
+    "match": true,
+    "should_use_rag": false
+  },
+  {
+    "id": 6,
+    "question": "Какой максимальный вес принимает СДЭК для посылки?",
+    "expected_mode": "RAG",
+    "actual_mode": "RAG",
+    "match": true,
+    "should_use_rag": true
+  }
+]

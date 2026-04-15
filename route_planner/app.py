@@ -46,6 +46,7 @@ class AppState:
         self.mcp_connected: bool = False
         self.mcp_servers_status: Dict[str, bool] = {}
         self.selected_model: str = "openrouter/free"
+        self.rag_available: bool = False
 
 
 app_state = AppState()
@@ -59,11 +60,18 @@ def init_agent(model: str) -> Tuple[Optional[RoutePlannerAgent], bool]:
         try:
             agent = RoutePlannerAgent(model=model)
             success = await agent.connect_mcp()
+            
             # Сохраняем статус серверов
             if agent.orchestrator.sessions:
                 app_state.mcp_servers_status = {
                     name: True for name in agent.orchestrator.sessions.keys()
                 }
+            
+            # Проверяем доступность RAG
+            app_state.rag_available = agent.rag_retriever is not None
+            if app_state.rag_available:
+                print("✅ RAG доступен в приложении")
+            
             return agent, success
         except Exception as e:
             print(f"Ошибка инициализации агента: {e}")
@@ -187,7 +195,8 @@ def reconnect_mcp():
             pass
     app_state.agent = None
     app_state.mcp_connected = False
-    return "MCP переподключено. Статус обновится при следующем сообщении."
+    app_state.rag_available = False
+    return "Инструменты переподключены. Статус обновится при следующем сообщении."
 
 
 def clear_history():
@@ -198,7 +207,7 @@ def clear_history():
 
 
 def get_mcp_status() -> str:
-    """Возвращает статус MCP."""
+    """Возвращает статус MCP и RAG."""
     if not app_state.agent:
         return "❌ Агент не инициализирован"
     
@@ -208,10 +217,31 @@ def get_mcp_status() -> str:
         for server_name in app_state.agent.orchestrator.sessions.keys():
             servers.append(f"✅ {server_name}")
     
+    # Добавляем статус RAG
+    rag_status = "✅ RAG доступен" if app_state.rag_available else "❌ RAG недоступен"
+    
+    result = []
     if servers:
-        return "\n".join(servers)
+        result.append("📡 MCP серверы:")
+        result.extend(servers)
     else:
-        return "❌ Нет подключенных серверов"
+        result.append("📡 MCP серверы: ❌ Нет подключенных серверов")
+    
+    result.append("")
+    result.append("🔍 RAG статус:")
+    result.append(f"  {rag_status}")
+    
+    if app_state.rag_available and hasattr(app_state.agent.rag_retriever, 'get_index_stats'):
+        try:
+            stats = app_state.agent.rag_retriever.get_index_stats()
+            if isinstance(stats, dict) and 'total_chunks' in stats:
+                result.append(f"  Чанков: {stats['total_chunks']}")
+                if 'total_files' in stats:
+                    result.append(f"  Файлов: {stats['total_files']}")
+        except Exception:
+            pass
+    
+    return "\n".join(result)
 
 
 def update_loading_indicator(processing_state: bool) -> str:
@@ -258,15 +288,26 @@ with gr.Blocks(
             
             model_status = gr.Markdown(f"Модель: {model_names[0]}")
             
-            gr.Markdown("## 📡 Статус MCP серверов")
+            gr.Markdown("## 📡 Статус инструментов")
             mcp_status = gr.Textbox(
                 value=get_mcp_status(),
-                label="Подключенные серверы",
+                label="Статус MCP и RAG",
                 interactive=False,
-                lines=3
+                lines=6
             )
             
             reconnect_btn = gr.Button("🔄 Переподключить MCP", variant="secondary")
+            
+            gr.Markdown("## 🔍 Режимы работы")
+            gr.Markdown("""
+**Агент автоматически выбирает инструменты:**
+
+- 📚 **RAG** - для поиска информации в документах
+- 🔧 **MCP** - для расчетов маршрутов и стоимости
+- 💡 **Знания** - для общих вопросов
+
+Система сама определяет, какой инструмент использовать!
+""")
             
             gr.Markdown("## 🔍 Отладка MCP")
             debug_output = gr.Textbox(
@@ -308,6 +349,10 @@ with gr.Blocks(
                 agent, success = init_agent(app_state.selected_model)
                 app_state.agent = agent
                 app_state.mcp_connected = success
+                
+                # Обновляем статус RAG
+                if app_state.agent:
+                    app_state.rag_available = app_state.agent.rag_retriever is not None
             
             # Получаем ответ от агента
             response = process_message(app_state.agent, message)

@@ -1,6 +1,6 @@
 """
 LLM агент для планирования маршрутов.
-Использует OpenAI API через OpenRouter и MCP инструменты.
+Использует OpenAI API через OpenRouter, MCP инструменты и RAG для поиска в документах.
 """
 
 import json
@@ -20,49 +20,30 @@ load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-SYSTEM_PROMPT = """Ты агент-планировщик маршрутов.
+SYSTEM_PROMPT = """Ты умный логист-ассистент. У тебя есть инструменты:
+
+## MCP ИНСТРУМЕНТЫ (для расчётов):
+- mcp_geocode_batch - координаты городов
+- mcp_find_optimal_route - оптимальный маршрут
+- mcp_calculate_cost - стоимость доставки (через API ПЭК)
+
+## RAG (для поиска в документах):
+- Ты можешь искать информацию в документах (тарифы, правила, постановления)
+
+## ПРАВИЛА ВЫБОРА ИНСТРУМЕНТА:
+- Если вопрос про **расстояние, маршрут, стоимость доставки, координаты** → используй MCP
+- Если вопрос про **правила, обязанности, тарифы из документов, API ПЭК** → сначала поищи в RAG
+- Если вопрос про **общие понятия** → отвечай из своих знаний
+
+## ФОРМАТ ОТВЕТА:
+- Если использовал MCP: укажи 🔧 MCP
+- Если использовал RAG: укажи 📚 RAG + источник
+- Если использовал знания: укажи 💡
 
 ОГРАНИЧЕНИЕ: Могу обработать максимум 5 городов. 
 Если пользователь указывает больше 5 городов:
 1. Используй только первые 5
 2. Сообщи пользователю: "⚠️ Я могу обработать только первые 5 городов из указанных. Будет рассчитан маршрут: [список 5 городов]"
-
-### Доступные MCP серверы:
-
-#### Сервер yandex (геокодирование и маршруты):
-- geocode_batch(cities=[...]) - получает координаты городов
-- find_optimal_route(coordinates_json=...) - находит оптимальный порядок обхода точек
-- calculate_distance(city1, city2) - рассчитывает расстояние между двумя городами
-- format_route_summary(route_json=...) - форматирует результат в читаемый вид
-
-#### Сервер pecom (доставка ПЭК):
-- pecom__calculate_cost(from_city, to_city, weight_kg, length_m, width_m, height_m) - рассчитывает стоимость доставки
-  Параметры: from_city, to_city, weight_kg, length_m, width_m, height_m
-  Пример: pecom__calculate_cost(from_city="Москва", to_city="Казань", weight_kg=10)
-  Вес по умолчанию: 50 кг, габариты: 0.5×0.5×0.4 м
-
-### Флоу работы:
-
-#### Расчет расстояния между двумя городами:
-1. Вызови calculate_distance(city1="Город1", city2="Город2")
-2. Ответь пользователю результатом расчета
-
-#### Простой поиск маршрута:
-1. Вызови geocode_batch(cities=[...])
-2. Передай результат в find_optimal_route(coordinates_json=...)
-3. Передай результат в format_route_summary(route_json=...)
-4. Ответь пользователю итоговым текстом
-
-#### Поиск маршрута со стоимостью доставки:
-1. Вызови geocode_batch(cities=[...])
-2. Передай результат в find_optimal_route(coordinates_json=...)
-3. Для КАЖДОГО сегмента маршрута вызови pecom__calculate_cost:
-   - Москва → Казань
-   - Казань → Санкт-Петербург
-   и т.д.
-4. Суммируй стоимость всех сегментов
-5. Передай результат в format_route_summary(route_json=...)
-6. Добавь в ответ информацию о стоимости доставки ПЭК для каждого сегмента
 
 Важно: вызывай инструменты строго по порядку.
 Важно: запрещено пользоваться поиском по интернету, до тех пор пока доступны инструменты mcp
@@ -245,7 +226,7 @@ class MCPOrchestrator:
 
 
 class RoutePlannerAgent:
-    """Агент для планирования маршрутов с MCP инструментами."""
+    """Агент для планирования маршрутов с MCP инструментами и RAG поиском."""
     
     def __init__(self, model: str = "openrouter/auto"):
         """
@@ -263,6 +244,24 @@ class RoutePlannerAgent:
         )
         self.orchestrator = MCPOrchestrator()
         self.state = AgentState()
+        self.rag_retriever = None
+        
+        # Инициализация RAG retriever
+        self._init_rag_retriever()
+    
+    def _init_rag_retriever(self):
+        """Инициализирует RAG retriever."""
+        try:
+            # Добавляем путь к корневой директории проекта для импорта
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            sys.path.insert(0, project_root)
+            
+            from rag_retriever import RAGRetriever
+            self.rag_retriever = RAGRetriever()
+            print("✅ RAG Retriever загружен")
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить RAG Retriever: {e}")
+            self.rag_retriever = None
     
     async def connect_mcp(self) -> bool:
         """
@@ -331,7 +330,7 @@ class RoutePlannerAgent:
     
     async def process_message(self, user_message: str, callback=None) -> str:
         """
-        Обрабатывает сообщение пользователя.
+        Обрабатывает сообщение пользователя с интеллектуальной маршрутизацией между RAG и MCP.
         
         Args:
             user_message: Сообщение пользователя
@@ -343,10 +342,89 @@ class RoutePlannerAgent:
         # Добавляем сообщение пользователя в историю
         self.state.messages.append({"role": "user", "content": user_message})
         
+        # Определяем стратегию обработки
+        use_rag = self._should_use_rag(user_message)
+        
+        if callback:
+            await callback(f"📊 Анализ запроса... {'📚 RAG' if use_rag else '🔧 MCP'} режим")
+        
+        if use_rag and self.rag_retriever:
+            # Режим RAG: поиск в документах
+            try:
+                if callback:
+                    await callback("🔍 Ищу информацию в документах...")
+                
+                # Поиск релевантных чанков
+                chunks = self.search_with_rag(user_message, top_k=3)
+                
+                if chunks:
+                    # Строим промпт с RAG контекстом
+                    rag_prompt = self._build_rag_prompt(user_message, chunks)
+                    
+                    if callback:
+                        await callback(f"📄 Найдено {len(chunks)} релевантных фрагментов")
+                    
+                    # Получаем ответ от LLM с RAG контекстом
+                    messages = [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": rag_prompt}
+                    ]
+                    
+                    response = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        max_tokens=1024
+                    )
+                    
+                    answer = response.choices[0].message.content or "Не удалось получить ответ"
+                    
+                    # Добавляем информацию об использованных источниках
+                    sources = ", ".join(set(chunk['filename'] for chunk in chunks))
+                    final_response = f"📚 RAG (источники: {sources})\n\n{answer}"
+                    
+                else:
+                    # Если ничего не найдено, используем обычный режим
+                    messages = [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_message}
+                    ]
+                    
+                    response = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        max_tokens=1024
+                    )
+                    
+                    answer = response.choices[0].message.content or "Не удалось получить ответ"
+                    final_response = f"💡 (RAG ничего не нашёл, использованы знания)\n\n{answer}"
+                
+                self.state.messages.append({"role": "assistant", "content": final_response})
+                return final_response
+                
+            except Exception as e:
+                error_msg = f"❌ Ошибка RAG: {e}"
+                self.state.messages.append({"role": "assistant", "content": error_msg})
+                return error_msg
+        
+        else:
+            # Режим MCP: использование инструментов для расчетов
+            return await self._process_with_mcp(user_message, callback)
+    
+    async def _process_with_mcp(self, user_message: str, callback=None) -> str:
+        """
+        Обрабатывает сообщение с использованием MCP инструментов.
+        
+        Args:
+            user_message: Сообщение пользователя
+            callback: Функция обратного вызова
+        
+        Returns:
+            Ответ агента
+        """
         # Формируем контекст для LLM
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            *self.state.messages
+            {"role": "user", "content": user_message}
         ]
         
         # Получаем все инструменты от оркестратора
@@ -364,38 +442,69 @@ class RoutePlannerAgent:
             assistant_message = response.choices[0].message
             
             # Обрабатываем вызовы инструментов с ограничением по количеству итераций
-            max_iterations = 10  # Максимальное количество итераций для предотвращения бесконечного цикла
+            max_iterations = 10
             iteration_count = 0
             
             while assistant_message.tool_calls and iteration_count < max_iterations:
                 iteration_count += 1
                 
-                messages.append({
-                    "role": "assistant",
-                    "content": assistant_message.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments
-                            }
-                        }
-                        for tc in assistant_message.tool_calls
-                    ]
-                })
+                if hasattr(assistant_message, 'tool_calls') and assistant_message.tool_calls:
+                    # Создаем запись с tool_calls в старом формате
+                    tool_calls_list = []
+                    for tc in assistant_message.tool_calls:
+                        try:
+                            # Пробуем разные способы доступа к данным
+                            if hasattr(tc, 'function'):
+                                if hasattr(tc.function, 'name') and hasattr(tc.function, 'arguments'):
+                                    tool_calls_list.append({
+                                        "id": tc.id if hasattr(tc, 'id') else str(hash(tc)),
+                                        "type": "function",
+                                        "function": {
+                                            "name": tc.function.name,
+                                            "arguments": tc.function.arguments
+                                        }
+                                    })
+                                else:
+                                    # Альтернативный способ
+                                    tool_data = getattr(tc, 'function', {})
+                                    tool_calls_list.append({
+                                        "id": tc.id if hasattr(tc, 'id') else str(hash(tc)),
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_data.get('name', 'unknown'),
+                                            "arguments": tool_data.get('arguments', '{}')
+                                        }
+                                    })
+                        except Exception as e:
+                            print(f"⚠️ Ошибка обработки tool_call: {e}")
+                            continue
+                    
+                    messages.append({
+                        "role": "assistant",
+                        "content": assistant_message.content or "",
+                        "tool_calls": tool_calls_list
+                    })
                 
                 for tool_call in assistant_message.tool_calls:
-                    # Используем правильный доступ к данным инструмента
-                    if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'name'):
-                        tool_name = tool_call.function.name
-                        arguments = json.loads(tool_call.function.arguments)
-                    else:
-                        # Альтернативный способ доступа к данным
-                        tool_data = getattr(tool_call, 'function', {})
-                        tool_name = tool_data.get('name', '')
-                        arguments = json.loads(tool_data.get('arguments', '{}'))
+                    tool_name = None
+                    arguments = {}
+                    
+                    try:
+                        if hasattr(tool_call, 'function'):
+                            if hasattr(tool_call.function, 'name') and hasattr(tool_call.function, 'arguments'):
+                                tool_name = tool_call.function.name
+                                arguments = json.loads(tool_call.function.arguments)
+                            else:
+                                tool_data = getattr(tool_call, 'function', {})
+                                tool_name = tool_data.get('name', '')
+                                arguments = json.loads(tool_data.get('arguments', '{}'))
+                    except Exception as e:
+                        print(f"⚠️ Ошибка извлечения данных из tool_call: {e}")
+                        tool_name = "unknown"
+                        arguments = {}
+                    
+                    if not tool_name:
+                        continue
                     
                     if callback:
                         await callback(f"🔧 Вызываю {tool_name}...")
@@ -421,7 +530,6 @@ class RoutePlannerAgent:
                 )
                 assistant_message = response.choices[0].message
             
-            # Если достигнут лимит итераций, но всё ещё есть вызовы инструментов
             if iteration_count >= max_iterations and assistant_message.tool_calls:
                 final_response = "❌ Превышено максимальное количество итераций. Возможно, проблема с интерпретацией запроса."
                 self.state.messages.append({"role": "assistant", "content": final_response})
@@ -431,18 +539,20 @@ class RoutePlannerAgent:
             final_response = assistant_message.content or "Не удалось получить ответ"
             
             # Добавляем информацию о статусе MCP
+            prefix = "🔧 MCP"
             if not self.state.mcp_available:
+                prefix = "⚠️ MCP недоступен"
                 final_response += "\n\n⚠️ MCP инструменты недоступны. Ответ дан без использования инструментов."
             elif self.state.mcp_calls:
                 success_count = sum(1 for c in self.state.mcp_calls if c.success)
                 final_response += f"\n\n✅ Использовано MCP инструментов: {success_count}/{len(self.state.mcp_calls)}"
             
+            final_response = f"{prefix}\n\n{final_response}"
             self.state.messages.append({"role": "assistant", "content": final_response})
             return final_response
         
         except Exception as e:
-            error_msg = f"❌ Ошибка агента: {e}"
-            # Добавляем информацию о вызовах инструментов для отладки
+            error_msg = f"❌ Ошибка MCP обработки: {e}"
             calls_info = f"\n📊 Вызовы инструментов: {len(self.state.mcp_calls)}"
             for i, call in enumerate(self.state.mcp_calls):
                 status = "✅" if call.success else "❌"
@@ -451,6 +561,95 @@ class RoutePlannerAgent:
             error_msg += calls_info
             self.state.messages.append({"role": "assistant", "content": error_msg})
             return error_msg
+    
+    def search_with_rag(self, query: str, top_k: int = 3) -> List[Dict]:
+        """
+        Ищет информацию в документах через RAG.
+        
+        Args:
+            query: Текстовый запрос
+            top_k: Количество возвращаемых результатов
+            
+        Returns:
+            Список словарей с информацией о чанках или пустой список при ошибке
+        """
+        if not self.rag_retriever:
+            return []
+        
+        try:
+            return self.rag_retriever.search(query, top_k)
+        except Exception as e:
+            print(f"⚠️ Ошибка RAG поиска: {e}")
+            return []
+    
+    def _build_rag_prompt(self, query: str, chunks: List[Dict]) -> str:
+        """
+        Строит промпт с RAG контекстом.
+        
+        Args:
+            query: Исходный запрос
+            chunks: Найденные чанки
+            
+        Returns:
+            Промпт с контекстом
+        """
+        if not chunks:
+            return query
+        
+        context = "\n".join([
+            f"📄 [{chunk['filename']}] {chunk['text']}"
+            for chunk in chunks
+        ])
+        
+        return f"""Пользователь задал вопрос: {query}
+
+## Релевантная информация из документов:
+{context}
+
+Ответь на вопрос пользователя, используя информацию из документов если она есть.
+Если информации в документах недостаточно, дополни ответ своими знаниями.
+Всегда указывай источники информации."""
+    
+    def _should_use_rag(self, user_message: str) -> bool:
+        """
+        Определяет, нужно ли использовать RAG для данного запроса.
+        
+        Args:
+            user_message: Сообщение пользователя
+            
+        Returns:
+            True если нужно использовать RAG
+        """
+        # Ключевые слова для RAG
+        rag_keywords = [
+            'тариф', 'правила', 'обязанности', 'постановление', 'закон',
+            'стоимость', 'цена', 'расценки', 'условия', 'требования',
+            'api', 'документ', 'инструкция', 'руководство', 'справочник',
+            'фрахтователь', 'фрахтовщик', 'перевозчик', 'экспедитор'
+        ]
+        
+        # Ключевые слова для MCP (расчетные запросы)
+        mcp_keywords = [
+            'расстояние', 'маршрут', 'координаты', 'город', 'городa',
+            'рассчитать', 'стоимость доставки', 'цена перевозки',
+            'оптимальный путь', 'кратчайший маршрут', 'геокодирование'
+        ]
+        
+        message_lower = user_message.lower()
+        
+        # Если есть ключевые слова для RAG и нет явных маршрутных запросов
+        has_rag_keywords = any(keyword in message_lower for keyword in rag_keywords)
+        has_mcp_keywords = any(keyword in message_lower for keyword in mcp_keywords)
+        
+        # Приоритет RAG для информационных запросов
+        if has_rag_keywords and not has_mcp_keywords:
+            return True
+        
+        # Если это общий информационный запрос без явных маршрутных указаний
+        if not has_mcp_keywords and len(user_message.split()) > 3:
+            return True
+            
+        return False
     
     def get_mcp_calls(self) -> List[MCPToolCall]:
         """Возвращает список вызовов MCP инструментов."""
