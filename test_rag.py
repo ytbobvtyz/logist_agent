@@ -241,7 +241,12 @@ def run_tests(use_real_llm: bool = False):
                 print(f"      [{i+1}] {chunk['filename']} (score: {chunk.get('score', 0):.3f})")
         
         # Ответ с RAG
-        answer_with = llm.ask_with_rag(test['question'], chunks)
+        if type(llm).__name__ == 'LogistAgent':
+            # Реальный LLM - он сам обрабатывает RAG
+            answer_with = llm.ask_with_rag(test['question'])
+        else:
+            # Mock LLM - нужно передать чанки
+            answer_with = llm.ask_with_rag(test['question'], chunks)
         eval_with = evaluate_answer(answer_with, test['expected_keywords'])
         source_correct = check_source(answer_with, test['expected_source']) if test['expected_source'] else True
         
