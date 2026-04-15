@@ -411,10 +411,10 @@ with gr.Blocks(
 
 if __name__ == "__main__":
     print("Starting application...")
-    print("Server will be available at http://localhost:7870")
+    print("Server will be available at http://localhost:7871")
     demo.launch(
         server_name="0.0.0.0",
-        server_port=7870,
+        server_port=7871,
         share=False,
         show_error=True,
         theme="soft"

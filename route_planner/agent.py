@@ -257,7 +257,10 @@ class RoutePlannerAgent:
             sys.path.insert(0, project_root)
             
             from rag_retriever import RAGRetriever
-            self.rag_retriever = RAGRetriever()
+            
+            # Указываем абсолютный путь к базе данных
+            db_path = os.path.join(project_root, "metadata.db")
+            self.rag_retriever = RAGRetriever(db_path=db_path)
             print("✅ RAG Retriever загружен")
         except Exception as e:
             print(f"⚠️ Не удалось загрузить RAG Retriever: {e}")
