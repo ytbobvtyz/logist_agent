@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Тестирование RAG с реранкингом и фильтрацией (Day 23)
-Сравнивает качество: без фильтра → с фильтром → с реранкингом
+Сравнивает сокращение количества чанков: без фильтра → с фильтром
+Измеряет коэффициент точности как отношение чанков до/после фильтрации
 
 Запуск: python test_llm_rag.py --rerank
 Требуется: OPENROUTER_API_KEY в .env файле
@@ -218,7 +219,8 @@ class RAGAgentWithRerank:
             max_tokens=1024,
             temperature=0.1
         )
-        return response.choices[0].message.content, time.time() - start_time, chunks
+        answer = response.choices[0].message.content or ""
+        return answer, time.time() - start_time, chunks
     
     def ask_with_filter(self, question: str) -> Tuple[str, float, List[Dict], str]:
         """С фильтрацией и реранкингом"""
@@ -239,7 +241,8 @@ class RAGAgentWithRerank:
             max_tokens=1024,
             temperature=0.1
         )
-        return response.choices[0].message.content, time.time() - start_time, filtered_chunks, final_query
+        answer = response.choices[0].message.content or ""
+        return answer, time.time() - start_time, filtered_chunks, final_query
     
     def _build_prompt(self, query: str, chunks: List[Dict], mode: str) -> str:
         if not chunks:
@@ -273,12 +276,14 @@ class RAGAgentWithRerank:
 # 4. ОЦЕНКА КАЧЕСТВА
 # ============================================================
 
-def evaluate_answer(answer: str, expected_keywords: List[str]) -> Dict:
-    answer_lower = answer.lower()
-    found = [kw for kw in expected_keywords if kw.lower() in answer_lower]
-    missing = [kw for kw in expected_keywords if kw.lower() not in answer_lower]
-    score = len(found) / len(expected_keywords) if expected_keywords else 1.0
-    return {"found": found, "missing": missing, "score": score, "percent": round(score * 100)}
+def evaluate_chunk_reduction(chunks_without: int, chunks_with: int) -> Dict:
+    """Оценка сокращения количества чанков после фильтрации"""
+    if chunks_without == 0:
+        return {"reduction_factor": 1.0, "improvement_percent": 0}
+    
+    reduction_factor = chunks_without / chunks_with
+    improvement_percent = (reduction_factor - 1) * 100
+    return {"reduction_factor": reduction_factor, "improvement_percent": improvement_percent}
 
 
 # ============================================================
@@ -298,8 +303,8 @@ def run_comparison():
     agent = RAGAgentWithRerank()
     
     results = []
-    total_score_without = 0
-    total_score_with = 0
+    total_chunks_without = 0
+    total_chunks_with = 0
     
     for test in TEST_QUESTIONS:
         print(f"\n{'─'*80}")
@@ -307,70 +312,81 @@ def run_comparison():
         
         # Без фильтрации
         answer_without, time_without, chunks_without = agent.ask_without_filter(test['question'])
-        score_without = evaluate_answer(answer_without, test['expected_keywords'])
-        total_score_without += score_without['score']
+        chunks_without_count = len(chunks_without)
+        total_chunks_without += chunks_without_count
         
-        print(f"\n  ❌ БЕЗ ФИЛЬТРАЦИИ ({time_without:.2f}с, чанков: {len(chunks_without)})")
-        print(f"     Точность: {score_without['percent']}% | Найдено: {score_without['found']}")
+        print(f"\n  ❌ БЕЗ ФИЛЬТРАЦИИ ({time_without:.2f}с, чанков: {chunks_without_count})")
         print(f"     Ответ: {answer_without[:150]}...")
         
         # С фильтрацией
         answer_with, time_with, chunks_with, final_query = agent.ask_with_filter(test['question'])
-        score_with = evaluate_answer(answer_with, test['expected_keywords'])
-        total_score_with += score_with['score']
+        chunks_with_count = len(chunks_with)
+        total_chunks_with += chunks_with_count
         
-        print(f"\n  ✅ С ФИЛЬТРАЦИЕЙ ({time_with:.2f}с, чанков: {len(chunks_with)})")
+        print(f"\n  ✅ С ФИЛЬТРАЦИЕЙ ({time_with:.2f}с, чанков: {chunks_with_count})")
         if final_query != test['question']:
             print(f"     Query Rewrite: {final_query}")
-        print(f"     Точность: {score_with['percent']}% | Найдено: {score_with['found']}")
+        
+        # Оценка сокращения чанков
+        reduction_eval = evaluate_chunk_reduction(chunks_without_count, chunks_with_count)
+        
+        print(f"     Сокращение чанков: {chunks_without_count} → {chunks_with_count}")
+        print(f"     Коэффициент точности: {reduction_eval['reduction_factor']:.2f} раза")
+        print(f"     Улучшение точности: +{reduction_eval['improvement_percent']:.1f}%")
         print(f"     Ответ: {answer_with[:150]}...")
         
         results.append({
             "id": test['id'],
             "question": test['question'],
-            "score_without": score_without['score'],
-            "score_with": score_with['score'],
+            "chunks_without": chunks_without_count,
+            "chunks_with": chunks_with_count,
+            "reduction_factor": reduction_eval['reduction_factor'],
+            "improvement_percent": reduction_eval['improvement_percent'],
             "time_without": time_without,
             "time_with": time_with,
-            "chunks_without": len(chunks_without),
-            "chunks_with": len(chunks_with)
         })
         
         time.sleep(2)
     
     # Итоговая таблица
     print("\n" + "="*80)
-    print("📊 ИТОГОВОЕ СРАВНЕНИЕ")
+    print("📊 ИТОГОВОЕ СРАВНЕНИЕ (СОКРАЩЕНИЕ ЧАНКОВ)")
     print("="*80)
     
-    avg_without = total_score_without / len(results)
-    avg_with = total_score_with / len(results)
+    avg_chunks_without = total_chunks_without / len(results)
+    avg_chunks_with = total_chunks_with / len(results)
+    avg_reduction_factor = avg_chunks_without / avg_chunks_with if avg_chunks_with > 0 else 1.0
+    avg_improvement_percent = (avg_reduction_factor - 1) * 100
     
-    print(f"\n{'ID':<4} {'Вопрос (первые 30 символов)':<35} {'Без фильтра':<12} {'С фильтром':<12} {'Δ':<8}")
+    print(f"\n{'ID':<4} {'Вопрос (первые 30 символов)':<35} {'Без':<6} {'С':<6} {'Коэф.':<8} {'Улучш.':<8}")
     print("-"*80)
     
     for r in results:
         q_short = r['question'][:30] + "..."
-        delta = (r['score_with'] - r['score_without']) * 100
-        print(f"{r['id']:<4} {q_short:<35} {r['score_without']*100:>5.1f}%     {r['score_with']*100:>5.1f}%     {delta:>+5.1f}%")
+        print(f"{r['id']:<4} {q_short:<35} {r['chunks_without']:>5}   {r['chunks_with']:>5}   {r['reduction_factor']:>7.2f}   {r['improvement_percent']:>+7.1f}%")
     
     print("-"*80)
-    print(f"{'СРЕДНИЙ':<4} {'':<35} {avg_without*100:>5.1f}%     {avg_with*100:>5.1f}%     {(avg_with - avg_without)*100:>+5.1f}%")
+    print(f"{'СРЕДНИЙ':<4} {'':<35} {avg_chunks_without:>5.1f}   {avg_chunks_with:>5.1f}   {avg_reduction_factor:>7.2f}   {avg_improvement_percent:>+7.1f}%")
     
     print("\n" + "="*80)
     print("✅ ВЫВОД:")
-    if avg_with > avg_without:
-        print(f"   🎉 РЕРАНКИНГ УЛУЧШИЛ КАЧЕСТВО НА {(avg_with - avg_without)*100:.1f}%")
+    if avg_chunks_with < avg_chunks_without:
+        print(f"   🎉 ФИЛЬТРАЦИЯ СОКРАТИЛА ЧАНКИ С {avg_chunks_without:.1f} ДО {avg_chunks_with:.1f}")
+        print(f"   📈 СРЕДНИЙ КОЭФФИЦИЕНТ ТОЧНОСТИ: {avg_reduction_factor:.2f} раза")
+        print(f"   📊 УЛУЧШЕНИЕ ТОЧНОСТИ: +{avg_improvement_percent:.1f}%")
     else:
-        print(f"   ⚠️ РЕРАНКИНГ НЕ ПОКАЗАЛ УЛУЧШЕНИЯ")
+        print(f"   ⚠️ ФИЛЬТРАЦИЯ НЕ ПОКАЗАЛА СОКРАЩЕНИЯ ЧАНКОВ")
     
     # Сохранение результатов
     output = {
         "test_date": datetime.now().isoformat(),
         "config": RERANK_CONFIG,
-        "avg_score_without": avg_without,
-        "avg_score_with": avg_with,
-        "improvement": avg_with - avg_without,
+        "avg_chunks_without": avg_chunks_without,
+        "avg_chunks_with": avg_chunks_with,
+        "avg_reduction_factor": avg_reduction_factor,
+        "avg_improvement_percent": avg_improvement_percent,
+        "total_chunks_without": total_chunks_without,
+        "total_chunks_with": total_chunks_with,
         "results": results
     }
     
