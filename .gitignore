@@ -9,4 +9,5 @@ route_planner_streamlit_backup
 .kilo
 deepseek*
 DEEPSEEK*
-faiss_index_*
+faiss_index*
+data/

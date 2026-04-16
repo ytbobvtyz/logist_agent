@@ -29,7 +29,7 @@ class RAGRetriever:
     
     def __init__(self, 
                  db_path: str = "metadata.db",
-                 index_path: str = "faiss_index_sentence",
+                 index_path: str = "faiss_index",
                  model_name: str = "paraphrase-multilingual-MiniLM-L12-v2"):
         """
         Инициализация RAG Retriever.
@@ -108,26 +108,29 @@ class RAGRetriever:
             query_vector = np.array(query_vector, dtype=np.float32).reshape(1, -1)
             faiss.normalize_L2(query_vector)
             
-            # Поиск возвращает (score, chunk_id)
-            results_with_ids = self.index.search(query_vector, top_k * 2)
+            # Поиск в FAISS
+            distances, indices = self.index.search(query_vector, top_k * 2)
             
-            # Получаем чанки из БД по ID
             results = []
             cursor = self.db_conn.cursor()
             
-            for score, chunk_id in results_with_ids:
-                cursor.execute(
-                    "SELECT text, filename FROM chunks WHERE id = ?", 
-                    (chunk_id,)
-                )
-                row = cursor.fetchone()
-                if row:
-                    results.append({
-                        'text': row[0],
-                        'filename': row[1],
-                        'score': score
-                    })
+            for dist, idx in zip(distances[0], indices[0]):
+                if idx >= 0 and idx < len(self.chunk_ids):
+                    chunk_id = self.chunk_ids[idx]
+                    cursor.execute(
+                        "SELECT text, filename FROM chunks WHERE id = ?", 
+                        (chunk_id,)
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        results.append({
+                            'text': row[0],
+                            'filename': row[1],
+                            'score': float(dist),
+                            'chunk_id': chunk_id
+                        })
             
+            results.sort(key=lambda x: x['score'], reverse=True)
             return results[:top_k]
             
         except Exception as e:

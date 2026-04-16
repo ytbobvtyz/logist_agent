@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 RAG система для индексации документов перевозчиков
-Единая стратегия: фиксированный размер чанка 500 символов, overlap 50
+Поддерживает TXT и PDF файлы
 """
 
 import pickle
@@ -21,32 +21,61 @@ except ImportError as e:
     print(f"   pip install sentence-transformers faiss-cpu")
     raise e
 
+# Поддержка PDF
+try:
+    from pypdf import PdfReader
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+    print("⚠️ pypdf не установлен. PDF файлы будут игнорироваться.")
+    print("   Установите: pip install pypdf")
 
-# ============================================================
-# 1. ЗАГРУЗКА ДОКУМЕНТОВ
-# ============================================================
 
 def load_documents(data_dir: str = "data/carriers") -> List[Dict]:
-    """Загружает все .txt файлы из папки"""
+    """Загружает все .txt и .pdf файлы из папки"""
     documents = []
     
     if not os.path.exists(data_dir):
         raise FileNotFoundError(f"Папка {data_dir} не найдена")
     
     for filename in os.listdir(data_dir):
+        file_path = os.path.join(data_dir, filename)
+        
         if filename.endswith('.txt'):
-            with open(os.path.join(data_dir, filename), 'r', encoding='utf-8') as f:
+            with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read().strip()
                 if content:
                     documents.append({
                         'filename': filename,
                         'content': content
                     })
-                    print(f"  ✓ Загружен: {filename}")
+                    print(f"  ✓ Загружен TXT: {filename}")
+        
+        elif filename.endswith('.pdf') and PDF_SUPPORT:
+            try:
+                reader = PdfReader(file_path)
+                content = ""
+                for page_num, page in enumerate(reader.pages, 1):
+                    text = page.extract_text()
+                    if text:
+                        content += f"\n--- Страница {page_num} ---\n" + text + "\n"
+                
+                if content.strip():
+                    documents.append({
+                        'filename': filename,
+                        'content': content
+                    })
+                    print(f"  ✓ Загружен PDF: {filename} ({len(reader.pages)} стр., {len(content):,} символов)")
+                else:
+                    print(f"  ⚠️ PDF не содержит текста: {filename}")
+                    
+            except Exception as e:
+                print(f"  ❌ Ошибка чтения PDF {filename}: {e}")
+        elif filename.endswith('.pdf') and not PDF_SUPPORT:
+            print(f"  ⚠️ Пропущен PDF (установите pypdf): {filename}")
     
     print(f"\n📄 Всего загружено: {len(documents)} документов")
     return documents
-
 
 # ============================================================
 # 2. ЧАНКИНГ (фиксированный размер)
@@ -318,7 +347,7 @@ def main():
             print("    ❌ Ничего не найдено")
     
     print("\n✅ Готово!")
-    print("💾 FAISS индекс: faiss_index + faiss_index.mapping")
+    print("💾 FAISS индекс: faiss_index + ")
     print("💾 Метаданные: metadata.db")
 
 
