@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 RAG система для индексации документов перевозчиков
-Оптимизировано для i7 / 12GB RAM
+Единая стратегия: фиксированный размер чанка 500 символов, overlap 50
 """
 
+import pickle
 import os
 import re
 import time
@@ -48,11 +49,11 @@ def load_documents(data_dir: str = "data/carriers") -> List[Dict]:
 
 
 # ============================================================
-# 2. ЧАНКИНГ (ДВЕ СТРАТЕГИИ)
+# 2. ЧАНКИНГ (фиксированный размер)
 # ============================================================
 
 def chunk_by_fixed_size(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
-    """Стратегия 1: Фиксированный размер с перекрытием"""
+    """Разбиение на чанки фиксированного размера с перекрытием"""
     chunks = []
     start = 0
     text_len = len(text)
@@ -76,91 +77,71 @@ def chunk_by_fixed_size(text: str, chunk_size: int = 500, overlap: int = 50) -> 
     return chunks
 
 
-def chunk_by_sentences(text: str, max_chunk_size: int = 500) -> List[str]:
-    """Стратегия 2: По границам предложений"""
-    # Разбиваем на предложения
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    
-    chunks = []
-    current_chunk = ""
-    
-    for sentence in sentences:
-        if len(sentence) > max_chunk_size:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-                current_chunk = ""
-            
-            # Разбиваем длинное предложение
-            words = sentence.split()
-            temp = ""
-            for word in words:
-                if len(temp) + len(word) + 1 < max_chunk_size:
-                    temp += " " + word if temp else word
-                else:
-                    if temp:
-                        chunks.append(temp.strip())
-                    temp = word
-            if temp:
-                chunks.append(temp.strip())
-        
-        elif len(current_chunk) + len(sentence) + 1 < max_chunk_size:
-            current_chunk += " " + sentence if current_chunk else sentence
-        else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = sentence
-    
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-    
-    return chunks
-
-
 # ============================================================
-# 3. ЭМБЕДДИНГИ (оптимизировано для CPU/12GB RAM)
+# 3. ЭМБЕДДИНГИ
 # ============================================================
 
 def get_embedding_model():
     """Загружает лёгкую модель для CPU"""
     print("\n🔧 Загрузка модели эмбеддингов...")
-    # Модель: 384 dim, ~120MB RAM, хорошо для русского
     model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-    print(f"  ✓ Модель загружена (размерность: {model.get_sentence_embedding_dimension()})")
+    print(f"  ✓ Модель загружена (размерность: {model.get_embedding_dimension()})")
     return model
 
 
 # ============================================================
-# 4. FAISS ИНДЕКС
+# 4. FAISS ИНДЕКС С MAPPING
 # ============================================================
 
 class VectorIndex:
-    """FAISS индекс для поиска по косинусному сходству"""
+    """FAISS индекс с сохранением mapping к chunk_id"""
     
     def __init__(self, dimension: int):
         self.dimension = dimension
         self.index = faiss.IndexFlatIP(dimension)
-        self.chunks = []  # список словарей с метаданными
+        self.chunk_ids = []
     
-    def add(self, vectors: np.ndarray, chunks: List[Dict]):
+    def add(self, vectors: np.ndarray, chunk_ids: List[int]):
         """Добавляет векторы в индекс"""
-        # Нормализуем для косинусного сходства
         faiss.normalize_L2(vectors)
         self.index.add(vectors)
-        self.chunks.extend(chunks)
+        self.chunk_ids.extend(chunk_ids)
     
-    def search(self, query_vector: np.ndarray, top_k: int = 3) -> List[Tuple[float, Dict]]:
-        """Ищет топ-k похожих чанков"""
+    def search(self, query_vector: np.ndarray, top_k: int = 3) -> List[Tuple[float, int]]:
+        """Возвращает (score, chunk_id)"""
         query_vector = query_vector.reshape(1, -1)
         faiss.normalize_L2(query_vector)
-        
         distances, indices = self.index.search(query_vector, top_k)
         
         results = []
         for dist, idx in zip(distances[0], indices[0]):
-            if 0 <= idx < len(self.chunks):
-                results.append((float(dist), self.chunks[idx]))
+            if 0 <= idx < len(self.chunk_ids):
+                results.append((float(dist), self.chunk_ids[idx]))
         
         return results
+    
+    def save(self, path: str):
+        """Сохраняет индекс и mapping"""
+        faiss.write_index(self.index, path)
+        
+        mapping_path = path + ".mapping"
+        with open(mapping_path, 'wb') as f:
+            pickle.dump(self.chunk_ids, f)
+        print(f"  💾 Индекс сохранён: {path}")
+        print(f"  💾 Mapping сохранён: {mapping_path}")
+    
+    @classmethod
+    def load(cls, path: str):
+        """Загружает индекс и mapping"""
+        index = cls(384)
+        index.index = faiss.read_index(path)
+        
+        mapping_path = path + ".mapping"
+        if os.path.exists(mapping_path):
+            with open(mapping_path, 'rb') as f:
+                index.chunk_ids = pickle.load(f)
+        
+        return index
 
 
 # ============================================================
@@ -168,8 +149,6 @@ class VectorIndex:
 # ============================================================
 
 class MetadataDB:
-    """Хранилище метаданных"""
-    
     def __init__(self, db_path: str = "metadata.db"):
         self.db_path = db_path
         self._init_db()
@@ -182,7 +161,6 @@ class MetadataDB:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text TEXT NOT NULL,
                 filename TEXT NOT NULL,
-                strategy TEXT NOT NULL,
                 chunk_index INTEGER
             )
         ''')
@@ -196,89 +174,95 @@ class MetadataDB:
         conn.commit()
         conn.close()
     
-    def add_chunk(self, text: str, filename: str, strategy: str, chunk_index: int) -> int:
+    def add_chunk(self, text: str, filename: str, chunk_index: int) -> int:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO chunks (text, filename, strategy, chunk_index)
-            VALUES (?, ?, ?, ?)
-        ''', (text, filename, strategy, chunk_index))
+            INSERT INTO chunks (text, filename, chunk_index)
+            VALUES (?, ?, ?)
+        ''', (text, filename, chunk_index))
         chunk_id = cursor.lastrowid
         conn.commit()
         conn.close()
         return chunk_id
+    
+    def get_chunk_by_id(self, chunk_id: int) -> Dict:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT text, filename FROM chunks WHERE id = ?", (chunk_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return {'text': row[0], 'filename': row[1]}
+        return None
+    
+    def get_all_chunks(self) -> List[Dict]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, text, filename FROM chunks")
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'id': r[0], 'text': r[1], 'filename': r[2]} for r in rows]
 
 
 # ============================================================
 # 6. ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
-def index_strategy(strategy_name: str, chunking_func, documents: List[Dict],
-                   model, db: MetadataDB) -> Tuple[VectorIndex, Dict]:
-    """Индексирует документы одной стратегией"""
+def index_documents(documents: List[Dict], model, db: MetadataDB) -> VectorIndex:
+    """Индексирует все документы одной стратегией"""
     print(f"\n{'='*50}")
-    print(f"📊 Стратегия: {strategy_name.upper()}")
+    print("📊 ИНДЕКСАЦИЯ (fixed size, 500/50)")
     print(f"{'='*50}")
     
-    all_chunks = []
     all_texts = []
+    chunk_ids = []
     
     start = time.time()
     
     for doc in documents:
-        chunks = chunking_func(doc['content'])
+        chunks = chunk_by_fixed_size(doc['content'])
         print(f"  {doc['filename']}: {len(chunks)} чанков")
         
         for i, chunk in enumerate(chunks):
-            chunk_id = db.add_chunk(chunk, doc['filename'], strategy_name, i)
-            all_chunks.append({
-                'id': chunk_id,
-                'text': chunk,
-                'filename': doc['filename'],
-                'strategy': strategy_name
-            })
+            chunk_id = db.add_chunk(chunk, doc['filename'], i)
+            chunk_ids.append(chunk_id)
             all_texts.append(chunk)
     
     print(f"  🔄 Генерация {len(all_texts)} эмбеддингов...")
     embeddings = model.encode(all_texts, show_progress_bar=True)
     
     vector_idx = VectorIndex(embeddings.shape[1])
-    vector_idx.add(embeddings, all_chunks)
+    vector_idx.add(embeddings, chunk_ids)
+    
+    vector_idx.save("faiss_index")
     
     elapsed = time.time() - start
     
-    stats = {
-        'chunk_count': len(all_chunks),
-        'avg_size': sum(len(c['text']) for c in all_chunks) / len(all_chunks),
-        'time': elapsed
-    }
+    print(f"  ✅ {len(chunk_ids)} чанков | Средний размер: {sum(len(c) for c in all_texts) / len(all_texts):.0f} | {elapsed:.2f} сек")
     
-    print(f"  ✅ {stats['chunk_count']} чанков | Средний размер: {stats['avg_size']:.0f} | {stats['time']:.2f} сек")
-    
-    return vector_idx, stats
+    return vector_idx
 
 
-def search(query: str, vector_idx: VectorIndex, model, top_k: int = 3) -> List[Dict]:
+def search(query: str, vector_idx: VectorIndex, model, db: MetadataDB, top_k: int = 3) -> List[Dict]:
     """Поиск по индексу"""
     query_vec = model.encode([query])[0]
-    results = vector_idx.search(query_vec, top_k)
+    query_vec = np.array(query_vec, dtype=np.float32).reshape(1, -1)
     
-    return [
-        {'score': score, 'text': chunk['text'], 'filename': chunk['filename'], 'strategy': chunk['strategy']}
-        for score, chunk in results
-    ]
-
-
-def compare_strategies(strategies_stats: Dict):
-    """Таблица сравнения"""
-    print("\n" + "="*60)
-    print("📊 СРАВНЕНИЕ СТРАТЕГИЙ ЧАНКИНГА")
-    print("="*60)
-    print(f"{'Стратегия':<12} {'Чанков':<10} {'Средний размер':<18} {'Время (сек)':<10}")
-    print("-"*60)
-    for name, s in strategies_stats.items():
-        print(f"{name:<12} {s['chunk_count']:<10} {s['avg_size']:<18.0f} {s['time']:<10.2f}")
-    print("="*60)
+    results_with_ids = vector_idx.search(query_vec, top_k)
+    
+    results = []
+    for score, chunk_id in results_with_ids:
+        chunk_data = db.get_chunk_by_id(chunk_id)
+        if chunk_data:
+            results.append({
+                'score': score,
+                'text': chunk_data['text'],
+                'filename': chunk_data['filename'],
+                'chunk_id': chunk_id
+            })
+    
+    return results
 
 
 # ============================================================
@@ -287,7 +271,7 @@ def compare_strategies(strategies_stats: Dict):
 
 def main():
     print("="*60)
-    print("🚚 RAG индексация документов перевозчиков")
+    print("🚚 RAG индексация документов перевозчиков (единая стратегия)")
     print("="*60)
     
     # 1. Загрузка документов
@@ -300,28 +284,14 @@ def main():
     # 2. Загрузка модели
     model = get_embedding_model()
     
-    # 3. Подготовка БД
+    # 3. Подготовка БД (чистая)
     db = MetadataDB()
     db.clear()
     
-    # 4. Индексация двумя стратегиями
-    strategies = {
-        'fixed': chunk_by_fixed_size,
-        'sentence': chunk_by_sentences
-    }
+    # 4. Индексация
+    vector_idx = index_documents(documents, model, db)
     
-    indices = {}
-    stats = {}
-    
-    for name, func in strategies.items():
-        idx, s = index_strategy(name, func, documents, model, db)
-        indices[name] = idx
-        stats[name] = s
-    
-    # 5. Сравнение
-    compare_strategies(stats)
-    
-    # 6. Твои тестовые запросы
+    # 5. Тестовые запросы
     test_queries = [
         "обязанности фрахтователя и фрахтовщика",
         "условия перевозки опасных грузов",
@@ -337,18 +307,19 @@ def main():
         print(f"\n📌 Запрос: '{query}'")
         print("-"*40)
         
-        for strategy_name, idx in indices.items():
-            results = search(query, idx, model, top_k=2)
-            if results:
-                print(f"\n  [{strategy_name.upper()}]")
-                for r in results:
-                    print(f"    Score: {r['score']:.4f} | {r['filename']}")
-                    print(f"    {r['text'][:120]}...")
-            else:
-                print(f"\n  [{strategy_name.upper()}] Ничего не найдено")
+        results = search(query, vector_idx, model, db, top_k=3)
+        
+        if results:
+            for r in results:
+                print(f"    Score: {r['score']:.4f} | {r['filename']}")
+                print(f"    {r['text'][:150]}...")
+                print()
+        else:
+            print("    ❌ Ничего не найдено")
     
     print("\n✅ Готово!")
-    print("💾 FAISS индексы в памяти, метаданные в metadata.db")
+    print("💾 FAISS индекс: faiss_index + faiss_index.mapping")
+    print("💾 Метаданные: metadata.db")
 
 
 if __name__ == "__main__":
