@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Тестирование RAG с реранкингом и фильтрацией (Day 23)
-Сравнивает сокращение количества чанков: без фильтра → с фильтром
-Измеряет коэффициент точности как отношение чанков до/после фильтрации
+Тестирование RAG с цитатами, источниками и анти-галлюцинациями (Day 24)
 
-Запуск: python test_llm_rag.py --rerank
+Требования:
+- Ответ всегда содержит: ответ, список источников, цитаты
+- Если релевантность ниже порога → "не знаю" + просьба уточнить
+
+Запуск: python test_llm_rag.py --verify
 Требуется: OPENROUTER_API_KEY в .env файле
 """
 
@@ -35,372 +37,503 @@ from rag_retriever import RAGRetriever
 
 MODEL = "deepseek/deepseek-v3.2"
 
-# Параметры реранкинга
-RERANK_CONFIG = {
-    "similarity_threshold": 0.3,      # Порог отсечения
-    "top_k_before": 10,                # До фильтрации
-    "top_k_after": 3,                  # После фильтрации
-    "keyword_boost": 0.3,              # Вес ключевых слов
-    "enable_rewrite": True,            # Включить query rewrite
-}
+# Порог релевантности для ответа "не знаю"
+CONFIDENCE_THRESHOLD = 0.25
 
 TEST_QUESTIONS = [
     {"id": 1, "question": "Сколько стоит доставка груза 50 кг из Москвы в Санкт-Петербург у ПЭК?",
-     "expected_keywords": ["ПЭК", "50", "кг", "Москва", "Санкт-Петербург", "стоимость"],
      "expected_source": "pecom.txt", "category": "стоимость"},
     {"id": 2, "question": "Какие есть логистические аспекты функционирования транспорта?",
-     "expected_keywords": ["логист", "транспорт", "погруз", "услуг", "функц"],
      "expected_source": "transportnaya_logistika-titov_ba.pdf", "category": "образование"},
     {"id": 3, "question": "Расскажи про информационное обеспечение логистики?",
-     "expected_keywords": ["информ", "поток", "система", "ЛИС", "транспорт"],
-     "expected_source": "transportnaya_logistika-titov_ba.pdf", "category": "стоимость"},
+     "expected_source": "transportnaya_logistika-titov_ba.pdf", "category": "образование"},
     {"id": 4, "question": "Какая стоимость доставки ПЭК из Москвы в Казань для груза 100 кг?",
-     "expected_keywords": ["ПЭК", "Москва", "Казань", "стоимость", "100", "кг"],
      "expected_source": "pecom.txt", "category": "стоимость"},
     {"id": 5, "question": "Какой URL у публичного API ПЭК для расчёта стоимости?",
-     "expected_keywords": ["calc.pecom.ru", "ajax.php", "API", "URL"],
      "expected_source": "pecom_api_doc.txt", "category": "техническое"},
-    {"id": 6, "question": "Как передать вес груза в API ПЭК?",
-     "expected_keywords": ["вес", "параметр", "places", "weight"],
-     "expected_source": "pecom_api_doc.txt", "category": "техническое"},
+    {"id": 6, "question": "Какой максимальный вес посылки у СДЭК?",
+     "expected_source": "cdek.txt", "category": "техническое"},
     {"id": 7, "question": "Какой формат ответа возвращает API ПЭК?",
-     "expected_keywords": ["JSON", "метод", "Авто", "формат"],
      "expected_source": "pecom_api_doc.txt", "category": "техническое"},
     {"id": 8, "question": "Какие обязанности у фрахтователя?",
-     "expected_keywords": ["фрахтователь", "обязан", "оплатить", "принять"],
-     "expected_source": "postanovlenie.txt", "category": "юридическое"}
-
+     "expected_source": "postanovlenie.txt", "category": "юридическое"},
+    {"id": 9, "question": "Что такое фрахтовщик по закону?",
+     "expected_source": "postanovlenie.txt", "category": "юридическое"},
+    {"id": 10, "question": "Какова максимальная скорость фрахтового корабля в открытом море?",
+     "expected_source": None, "category": "нет_информации", "expected_unknown": True},
 ]
 
 
 # ============================================================
-# 2. РЕРАНКИНГ И ФИЛЬТРАЦИЯ
+# 2. ПРОМПТ С ТРЕБОВАНИЕМ ЦИТАТ И ИСТОЧНИКОВ
 # ============================================================
 
-class Reranker:
-    """Реранкинг и фильтрация результатов поиска"""
+def build_prompt_with_sources(query: str, chunks: List[Dict]) -> str:
+    """Строит промпт, требующий от модели указать источники и цитаты"""
     
-    def __init__(self, config: Dict):
-        self.threshold = config.get("similarity_threshold", 0.3)
-        self.keyword_boost = config.get("keyword_boost", 0.3)
-        self.enable_rewrite = config.get("enable_rewrite", True)
-        
-        # Стоп-слова для улучшения реранкинга
-        self.stop_words = {'и', 'в', 'на', 'с', 'по', 'к', 'у', 'о', 'об', 'от', 'до', 
-                          'за', 'под', 'над', 'без', 'для', 'не', 'ни', 'что', 'как'}
+    if not chunks:
+        return f"""Ты помощник-логист.
+
+## ВАЖНО: У меня НЕТ информации по этому вопросу в документах.
+
+Ответь строго по шаблону:
+
+## 📋 Ответ
+Извините, я не могу ответить на этот вопрос. В предоставленных документах нет информации по теме: "{query}"
+
+## 📚 Источники
+Нет источников
+
+## 📝 Цитаты
+Нет цитат
+
+## 💡 Рекомендация
+Пожалуйста, уточните вопрос или предоставьте дополнительные документы.
+
+Вопрос: {query}"""
     
-    def filter_by_threshold(self, chunks: List[Dict]) -> List[Dict]:
-        """Фильтрация по порогу релевантности"""
-        before = len(chunks)
-        filtered = [c for c in chunks if c.get('score', 0) >= self.threshold]
-        print(f"      📊 Фильтрация: {before} → {len(filtered)} чанков (порог={self.threshold})")
-        return filtered
+    # Сортируем чанки по релевантности
+    sorted_chunks = sorted(chunks, key=lambda x: x.get('score', 0), reverse=True)
     
-    def rerank_by_keywords(self, chunks: List[Dict], query: str) -> List[Dict]:
-        """Реранкинг на основе ключевых слов из запроса"""
-        if not chunks:
-            return chunks
+    # Формируем контекст с явными маркерами для цитирования
+    context_parts = []
+    for i, chunk in enumerate(sorted_chunks, 1):
+        score = chunk.get('score', 0)
+        filename = chunk.get('filename', 'unknown')
+        text = chunk.get('text', '')
         
-        keywords = self._extract_keywords(query)
+        # Обрезаем слишком длинные чанки
+        if len(text) > 800:
+            text = text[:800] + "..."
         
-        for chunk in chunks:
-            chunk_text = chunk.get('text', '').lower()
-            
-            # Считаем пересечение ключевых слов
-            matched = sum(1 for kw in keywords if kw in chunk_text)
-            keyword_score = matched / len(keywords) if keywords else 0
-            
-            # Итоговый скор = FAISS скор + бонус за ключевые слова
-            chunk['keyword_score'] = keyword_score
-            chunk['final_score'] = chunk.get('score', 0) + keyword_score * self.keyword_boost
-            chunk['score'] = chunk['final_score']
-        
-        return sorted(chunks, key=lambda x: x['score'], reverse=True)
+        context_parts.append(f"""
+--- ИСТОЧНИК [{i}] ---
+Файл: {filename}
+Релевантность: {score:.3f}
+Текст:
+{text}
+--- КОНЕЦ ИСТОЧНИКА [{i}] ---
+""")
     
-    def _extract_keywords(self, query: str) -> List[str]:
-        """Извлекает значимые ключевые слова из запроса"""
-        words = query.lower().split()
-        # Фильтруем стоп-слова и короткие слова
-        keywords = [w for w in words if w not in self.stop_words and len(w) > 2]
-        
-        # Добавляем расширения для ключевых слов
-        expansions = {
-            'стоимость': ['стоимость', 'цена', 'тариф', 'руб'],
-            'доставка': ['доставка', 'перевозка', 'отправка'],
-            'пэк': ['пэк', 'печ', 'первая экспедиционная'],
-            'сдэк': ['сдэк', 'cdek'],
-        }
-        
-        expanded = []
-        for kw in keywords:
-            expanded.append(kw)
-            if kw in expansions:
-                expanded.extend(expansions[kw])
-        
-        return list(set(expanded))
+    context = "\n".join(context_parts)
     
-    def rewrite_query(self, query: str, original_chunks: List[Dict]) -> str:
-        """Расширяет запрос, если мало результатов"""
-        if not self.enable_rewrite:
-            return query
-        
-        if len(original_chunks) >= 2:
-            return query
-        
-        # Словарь синонимов
-        synonyms = {
-            'стоимость': ['цена', 'тариф', 'руб', 'сколько'],
-            'доставка': ['перевозка', 'отправка', 'транспортировка'],
-            'груз': ['посылка', 'отправление', 'товар'],
-            'вес': ['масса', 'килограмм', 'кг'],
-            'правила': ['условия', 'требования', 'нормы'],
-        }
-        
-        words = query.lower().split()
-        new_words = words.copy()
-        
-        for word in words:
-            if word in synonyms:
-                new_words.extend(synonyms[word])
-        
-        rewritten = ' '.join(list(dict.fromkeys(new_words))[:15])
-        
-        if rewritten != query:
-            print(f"      🔄 Query Rewrite: '{query}' → '{rewritten}'")
-        
-        return rewritten
-    
-    def process(self, chunks: List[Dict], query: str) -> Tuple[List[Dict], str]:
-        """Полный пайплайн реранкинга"""
-        # Шаг 1: Фильтрация
-        filtered = self.filter_by_threshold(chunks)
-        
-        # Шаг 2: Реранкинг по ключевым словам
-        reranked = self.rerank_by_keywords(filtered, query)
-        
-        # Шаг 3: Query Rewrite при необходимости
-        final_query = query
-        if len(reranked) < 2:
-            final_query = self.rewrite_query(query, chunks)
-        
-        return reranked[:3], final_query
+    return f"""Ты помощник-логист.
+
+## ВАЖНЫЕ ПРАВИЛА (НЕ НАРУШАТЬ):
+
+1. **ОБЯЗАТЕЛЬНО** укажи источники в формате: 📄 [имя_файла]
+2. **ОБЯЗАТЕЛЬНО** приведи цитаты из документов в формате: 📝 "точная цитата из документа"
+3. **ОБЯЗАТЕЛЬНО** структурируй ответ по шаблону ниже
+4. Если информация в документах противоречива — укажи это
+5. Если релевантность источников низкая (< 0.25) — откажись отвечать
+
+## ФОРМАТ ОТВЕТА (СТРОГО):
+
+## 📋 Ответ
+[твой развёрнутый ответ на вопрос]
+
+## 📚 Источники
+- 📄 [имя_файла] (релевантность: X.XX)
+
+## 📝 Цитаты
+> "точная цитата из документа, подтверждающая ответ"
+
+## ПРИМЕР ПРАВИЛЬНОГО ФОРМАТА:
+
+## 📋 Ответ
+Стоимость доставки груза 50 кг из Москвы в Санкт-Петербург у ПЭК составляет 2450 рублей.
+
+## 📚 Источники
+- 📄 [pecom.txt]
+
+## 📝 Цитаты
+> "Тариф Москва → Санкт-Петербург: До 50 кг: 2450 ₽"
+
+## ТЕПЕРЬ ОТВЕТЬ НА ВОПРОС:
+
+## 📊 Контекст из документов:
+{context}
+
+## Вопрос пользователя:
+{query}
+
+## Твой ответ (строго по формату с источниками и цитатами):"""
 
 
 # ============================================================
-# 3. АГЕНТ С РЕРАНКИНГОМ
+# 3. АГЕНТ С ЦИТАТАМИ И ИСТОЧНИКАМИ
 # ============================================================
 
-class RAGAgentWithRerank:
-    def __init__(self, model: str = MODEL):
+class RAGAgentWithCitations:
+    def __init__(self, model: str = MODEL, threshold: float = CONFIDENCE_THRESHOLD):
         self.model = model
+        self.threshold = threshold
         self.client = OpenAI(
             api_key=OPENROUTER_API_KEY,
             base_url="https://openrouter.ai/api/v1",
             timeout=120.0
         )
         self.retriever = None
-        self.reranker = Reranker(RERANK_CONFIG)
         
         try:
             self.retriever = RAGRetriever()
             print(f"✅ RAG Retriever загружен")
         except Exception as e:
-            print(f"⚠️ Ошибка: {e}")
+            print(f"⚠️ Ошибка загрузки RAG: {e}")
     
-    def ask_without_filter(self, question: str) -> Tuple[str, float, List[Dict]]:
-        """Без фильтрации (простой поиск)"""
-        start_time = time.time()
-        chunks = self.retriever.search(question, top_k=5) if self.retriever else []
-        prompt = self._build_prompt(question, chunks, mode="without_filter")
+    def ask_with_citations(self, question: str, top_k: int = 5) -> Dict:
+        """
+        Запрос к LLM с требованием указать источники и цитаты
         
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1024,
-            temperature=0.1
-        )
-        answer = response.choices[0].message.content or ""
-        return answer, time.time() - start_time, chunks
-    
-    def ask_with_filter(self, question: str) -> Tuple[str, float, List[Dict], str]:
-        """С фильтрацией и реранкингом"""
+        Returns:
+            Dict с полями: answer, sources, quotes, confidence, chunks
+        """
         start_time = time.time()
         
-        # Первичный поиск (больше чанков)
-        raw_chunks = self.retriever.search(question, top_k=RERANK_CONFIG["top_k_before"]) if self.retriever else []
+        # Поиск чанков
+        chunks = self.retriever.search(question, top_k=top_k) if self.retriever else []
         
-        # Реранкинг
-        filtered_chunks, final_query = self.reranker.process(raw_chunks, question)
+        # Проверка релевантности
+        avg_score = sum(c.get('score', 0) for c in chunks) / len(chunks) if chunks else 0
         
-        # Финальный промпт
-        prompt = self._build_prompt(final_query, filtered_chunks, mode="with_filter")
+        # Если релевантность太低, форсируем ответ "не знаю"
+        if avg_score < self.threshold or not chunks:
+            answer = self._build_unknown_response(question)
+            return {
+                "answer": answer,
+                "sources": [],
+                "quotes": [],
+                "confidence": avg_score,
+                "chunks": chunks,
+                "response_time": time.time() - start_time,
+                "is_unknown": True,
+                "raw_response": answer
+            }
         
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1024,
-            temperature=0.1
-        )
-        answer = response.choices[0].message.content or ""
-        return answer, time.time() - start_time, filtered_chunks, final_query
+        # Строим промпт с требованием источников
+        prompt = build_prompt_with_sources(question, chunks)
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2048,
+                temperature=0.1
+            )
+            answer = response.choices[0].message.content or ""
+            
+            # Парсим ответ для извлечения источников и цитат
+            parsed = self._parse_response(answer)
+            
+            return {
+                "answer": parsed["answer"],
+                "sources": parsed["sources"],
+                "quotes": parsed["quotes"],
+                "confidence": avg_score,
+                "chunks": chunks,
+                "response_time": time.time() - start_time,
+                "is_unknown": False,
+                "raw_response": answer
+            }
+            
+        except Exception as e:
+            return {
+                "answer": f"❌ Ошибка: {e}",
+                "sources": [],
+                "quotes": [],
+                "confidence": 0,
+                "chunks": chunks,
+                "response_time": time.time() - start_time,
+                "is_unknown": True,
+                "raw_response": ""
+            }
     
-    def _build_prompt(self, query: str, chunks: List[Dict], mode: str) -> str:
-        if not chunks:
-            return f"Ты помощник-логист. Ответь на вопрос, используя свои знания.\n\nВопрос: {query}"
+    def _build_unknown_response(self, question: str) -> str:
+        """Строит ответ для случая "не знаю" """
+        return f"""## 📋 Ответ
+Извините, я не могу уверенно ответить на этот вопрос.
+
+**Причина:** В документах не найдено достаточно релевантной информации по запросу "{question}".
+
+## 📚 Источники
+Нет источников (релевантность ниже порога {self.threshold})
+
+## 📝 Цитаты
+Нет цитат
+
+## 💡 Рекомендация
+Пожалуйста, уточните вопрос или предоставьте дополнительные документы."""
+    
+    def _parse_response(self, response: str) -> Dict:
+        """Парсит ответ для извлечения источников и цитат"""
+        sources = []
+        quotes = []
         
-        context = "\n".join([
-            f"📄 [{c['filename']}] (релевантность: {c.get('score', 0):.3f})\n{c['text']}"
-            for c in chunks
-        ])
+        # Извлекаем источники (разные форматы)
+        source_patterns = [
+            r'📄\s*\[([^\]]+)\]',
+            r'Источник[:\s]+([^\n]+)',
+            r'Файл[:\s]+([^\n]+)',
+            r'\[([a-z_]+\.(txt|pdf))\]',
+            r'📄\s*([a-z_]+\.(txt|pdf))',
+        ]
         
-        mode_desc = "Используй ТОЛЬКО информацию из документов" if mode == "with_filter" else "Используй документы как дополнительный контекст"
+        for pattern in source_patterns:
+            found = re.findall(pattern, response, re.IGNORECASE)
+            for f in found:
+                if isinstance(f, tuple):
+                    sources.append(f[0])
+                else:
+                    sources.append(f)
         
-        return f"""Ты помощник-логист.
-
-## Инструкция:
-- {mode_desc}
-- Если информации нет в документах — честно скажи об этом
-- Всегда указывай источник (имя файла)
-- Будь точным и информативным
-
-## Документы:
-{context}
-
-## Вопрос:
-{query}
-
-## Ответ:"""
+        # Извлекаем цитаты (разные форматы)
+        quote_patterns = [
+            # Формат с 📝
+            r'📝\s*"([^"]+)"',
+            r'📝\s*"([^"]+)"',
+            # Цитата в кавычках
+            r'"([^"]{20,})"',
+            r'«([^»]{20,})»',
+            # Цитата с маркером >
+            r'>\s*"([^"]+)"',
+            r'>\s*(.+?)(?=\n\n|\n\[|\n#|$)',
+            # Цитата после слова "цитата"
+            r'цитат[аы]:\s*"([^"]+)"',
+            r'цитат[аы]:\s*(.+?)(?=\n\n|\n\[|\n#|$)',
+        ]
+        
+        for pattern in quote_patterns:
+            found = re.findall(pattern, response, re.IGNORECASE | re.DOTALL)
+            for q in found:
+                clean_q = q.strip()
+                if len(clean_q) > 20 and clean_q not in quotes:
+                    quotes.append(clean_q[:200])
+        
+        # Если цитат всё ещё нет, пробуем извлечь из секции "Цитаты"
+        if not quotes:
+            quotes_section = re.search(
+                r'##\s*📝\s*Цитаты\s*\n(.*?)(?=\n##|\Z)',
+                response,
+                re.DOTALL | re.IGNORECASE
+            )
+            if quotes_section:
+                lines = quotes_section.group(1).split('\n')
+                for line in lines:
+                    # Ищем кавычки
+                    quote_match = re.search(r'["«]([^"»]+)["»]', line)
+                    if quote_match:
+                        quotes.append(quote_match.group(1))
+                    # Ищем строки с маркером >
+                    elif line.strip().startswith('>'):
+                        quote_text = line.strip()[1:].strip()
+                        if len(quote_text) > 10:
+                            quotes.append(quote_text)
+        
+        # Извлекаем основной ответ
+        answer_match = re.search(
+            r'##\s*📋\s*Ответ\s*\n(.*?)(?=\n##\s*📚\s*Источники|\n##\s*📝\s*Цитаты|\Z)',
+            response,
+            re.DOTALL | re.IGNORECASE
+        )
+        answer = answer_match.group(1).strip() if answer_match else response[:500]
+        
+        # Очищаем источники от дубликатов и пустых строк
+        sources = [s for s in sources if s and len(s) > 2]
+        sources = list(dict.fromkeys(sources))
+        
+        # Очищаем цитаты от дубликатов
+        quotes = list(dict.fromkeys(quotes))
+        
+        return {
+            "answer": answer,
+            "sources": sources[:5],
+            "quotes": quotes[:3]
+        }
 
 
 # ============================================================
-# 4. ОЦЕНКА КАЧЕСТВА
+# 4. ВЕРИФИКАЦИЯ КАЧЕСТВА
 # ============================================================
 
-def evaluate_chunk_reduction(chunks_without: int, chunks_with: int) -> Dict:
-    """Оценка сокращения количества чанков после фильтрации"""
-    if chunks_without == 0:
-        return {"reduction_factor": 1.0, "improvement_percent": 0}
+def verify_response(result: Dict, test: Dict) -> Dict:
+    """Проверяет ответ на соответствие требованиям Day 24"""
     
-    reduction_factor = chunks_without / chunks_with
-    improvement_percent = (reduction_factor - 1) * 100
-    return {"reduction_factor": reduction_factor, "improvement_percent": improvement_percent}
+    checks = {
+        "has_answer": bool(result.get('answer') and len(result['answer']) > 20),
+        "has_sources": len(result.get('sources', [])) > 0,
+        "has_quotes": len(result.get('quotes', [])) > 0,
+        "correct_unknown": False,
+        "sources_match_chunks": False,
+    }
+    
+    # Проверка для вопросов без информации
+    if test.get('expected_unknown', False):
+        checks['correct_unknown'] = result.get('is_unknown', False) or "не могу" in result.get('answer', '').lower()
+    
+    # Проверка соответствия источников
+    if result.get('chunks') and result.get('sources'):
+        chunk_filenames = [c.get('filename', '') for c in result['chunks']]
+        for source in result['sources']:
+            if any(source in cf for cf in chunk_filenames):
+                checks['sources_match_chunks'] = True
+                break
+    
+    score = sum(checks.values()) / len(checks) * 100
+    
+    return {
+        "checks": checks,
+        "score": round(score, 1),
+        "passed": score >= 60
+    }
 
 
 # ============================================================
 # 5. ОСНОВНАЯ ФУНКЦИЯ
 # ============================================================
 
-def run_comparison():
+def run_verification():
     print("="*80)
-    print("🔍 ДЕНЬ 23: СРАВНЕНИЕ RAG С ФИЛЬТРАЦИЕЙ И БЕЗ")
+    print("🔍 ДЕНЬ 24: ВЕРИФИКАЦИЯ ЦИТАТ, ИСТОЧНИКОВ И АНТИ-ГАЛЛЮЦИНАЦИЙ")
     print("="*80)
     print(f"📅 Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"🤖 Модель: {MODEL}")
-    print(f"⚙️  Параметры: порог={RERANK_CONFIG['similarity_threshold']}, "
-          f"top_k={RERANK_CONFIG['top_k_before']}→{RERANK_CONFIG['top_k_after']}")
+    print(f"⚙️  Порог уверенности: {CONFIDENCE_THRESHOLD}")
     print("="*80)
     
-    agent = RAGAgentWithRerank()
+    agent = RAGAgentWithCitations(threshold=CONFIDENCE_THRESHOLD)
     
     results = []
-    total_chunks_without = 0
-    total_chunks_with = 0
+    total_score = 0
     
     for test in TEST_QUESTIONS:
         print(f"\n{'─'*80}")
-        print(f"📌 {test['question']}")
+        print(f"📌 ВОПРОС {test['id']}: {test['question']}")
+        print(f"   Категория: {test['category']}")
+        if test.get('expected_unknown'):
+            print(f"   🎯 Ожидается ответ 'не знаю'")
+        print("-"*40)
         
-        # Без фильтрации
-        answer_without, time_without, chunks_without = agent.ask_without_filter(test['question'])
-        chunks_without_count = len(chunks_without)
-        total_chunks_without += chunks_without_count
+        # Запрос к агенту
+        result = agent.ask_with_citations(test['question'])
         
-        print(f"\n  ❌ БЕЗ ФИЛЬТРАЦИИ ({time_without:.2f}с, чанков: {chunks_without_count})")
-        print(f"     Ответ: {answer_without[:150]}...")
+        # Верификация
+        verification = verify_response(result, test)
         
-        # С фильтрацией
-        answer_with, time_with, chunks_with, final_query = agent.ask_with_filter(test['question'])
-        chunks_with_count = len(chunks_with)
-        total_chunks_with += chunks_with_count
+        print(f"\n  ⏱️  Время: {result['response_time']:.2f}с")
+        print(f"  📊 Уверенность: {result['confidence']:.3f}")
+        print(f"  📚 Источников найдено: {len(result['sources'])}")
+        print(f"  📝 Цитат найдено: {len(result['quotes'])}")
         
-        print(f"\n  ✅ С ФИЛЬТРАЦИЕЙ ({time_with:.2f}с, чанков: {chunks_with_count})")
-        if final_query != test['question']:
-            print(f"     Query Rewrite: {final_query}")
+        print(f"\n  📋 Ответ:")
+        print(f"     {result['answer'][:300]}...")
         
-        # Оценка сокращения чанков
-        reduction_eval = evaluate_chunk_reduction(chunks_without_count, chunks_with_count)
+        if result['sources']:
+            print(f"\n  📚 Источники:")
+            for s in result['sources'][:3]:
+                print(f"     • {s}")
         
-        print(f"     Сокращение чанков: {chunks_without_count} → {chunks_with_count}")
-        print(f"     Коэффициент точности: {reduction_eval['reduction_factor']:.2f} раза")
-        print(f"     Улучшение точности: +{reduction_eval['improvement_percent']:.1f}%")
-        print(f"     Ответ: {answer_with[:150]}...")
+        if result['quotes']:
+            print(f"\n  📝 Цитаты:")
+            for q in result['quotes'][:2]:
+                print(f"     • \"{q[:100]}...\"")
+        
+        print(f"\n  ✅ Верификация:")
+        for check, passed in verification['checks'].items():
+            status = "✅" if passed else "❌"
+            print(f"     {status} {check}: {passed}")
+        
+        print(f"\n  📊 Оценка: {verification['score']}%")
         
         results.append({
             "id": test['id'],
             "question": test['question'],
-            "chunks_without": chunks_without_count,
-            "chunks_with": chunks_with_count,
-            "reduction_factor": reduction_eval['reduction_factor'],
-            "improvement_percent": reduction_eval['improvement_percent'],
-            "time_without": time_without,
-            "time_with": time_with,
+            "category": test['category'],
+            "expected_unknown": test.get('expected_unknown', False),
+            "verification": verification,
+            "sources": result['sources'],
+            "quotes": result['quotes'],
+            "confidence": result['confidence'],
+            "response_time": result['response_time'],
+            "answer_preview": result['answer'][:200]
         })
         
-        time.sleep(2)
+        total_score += verification['score']
+        
+        time.sleep(1)
     
-    # Итоговая таблица
+    # ===== ИТОГОВАЯ СТАТИСТИКА =====
     print("\n" + "="*80)
-    print("📊 ИТОГОВОЕ СРАВНЕНИЕ (СОКРАЩЕНИЕ ЧАНКОВ)")
+    print("📊 ИТОГОВАЯ СТАТИСТИКА")
     print("="*80)
     
-    avg_chunks_without = total_chunks_without / len(results)
-    avg_chunks_with = total_chunks_with / len(results)
-    avg_reduction_factor = avg_chunks_without / avg_chunks_with if avg_chunks_with > 0 else 1.0
-    avg_improvement_percent = (avg_reduction_factor - 1) * 100
+    avg_score = total_score / len(results)
     
-    print(f"\n{'ID':<4} {'Вопрос (первые 30 символов)':<35} {'Без':<6} {'С':<6} {'Коэф.':<8} {'Улучш.':<8}")
+    # Подсчёт метрик
+    has_sources_count = sum(1 for r in results if len(r['sources']) > 0)
+    has_quotes_count = sum(1 for r in results if len(r['quotes']) > 0)
+    unknown_correct = sum(1 for r in results if r['expected_unknown'] and r['verification']['checks']['correct_unknown'])
+    unknown_total = sum(1 for r in results if r['expected_unknown'])
+    
+    print(f"\n📈 ОБЩАЯ ОЦЕНКА: {avg_score:.1f}%")
+    
+    print(f"\n📊 ДЕТАЛИЗАЦИЯ:")
+    print(f"   • Ответы с источниками:    {has_sources_count}/{len(results)} ({has_sources_count/len(results)*100:.0f}%)")
+    print(f"   • Ответы с цитатами:       {has_quotes_count}/{len(results)} ({has_quotes_count/len(results)*100:.0f}%)")
+    if unknown_total > 0:
+        print(f"   • Корректные 'не знаю':    {unknown_correct}/{unknown_total} ({unknown_correct/unknown_total*100:.0f}%)")
+    
+    print(f"\n📋 ДЕТАЛЬНАЯ ТАБЛИЦА:")
+    print(f"{'ID':<4} {'Категория':<14} {'Оценка':<8} {'Источники':<10} {'Цитаты':<8} {'Уверенность':<12}")
     print("-"*80)
     
     for r in results:
-        q_short = r['question'][:30] + "..."
-        print(f"{r['id']:<4} {q_short:<35} {r['chunks_without']:>5}   {r['chunks_with']:>5}   {r['reduction_factor']:>7.2f}   {r['improvement_percent']:>+7.1f}%")
-    
-    print("-"*80)
-    print(f"{'СРЕДНИЙ':<4} {'':<35} {avg_chunks_without:>5.1f}   {avg_chunks_with:>5.1f}   {avg_reduction_factor:>7.2f}   {avg_improvement_percent:>+7.1f}%")
-    
-    print("\n" + "="*80)
-    print("✅ ВЫВОД:")
-    if avg_chunks_with < avg_chunks_without:
-        print(f"   🎉 ФИЛЬТРАЦИЯ СОКРАТИЛА ЧАНКИ С {avg_chunks_without:.1f} ДО {avg_chunks_with:.1f}")
-        print(f"   📈 СРЕДНИЙ КОЭФФИЦИЕНТ ТОЧНОСТИ: {avg_reduction_factor:.2f} раза")
-        print(f"   📊 УЛУЧШЕНИЕ ТОЧНОСТИ: +{avg_improvement_percent:.1f}%")
-    else:
-        print(f"   ⚠️ ФИЛЬТРАЦИЯ НЕ ПОКАЗАЛА СОКРАЩЕНИЯ ЧАНКОВ")
+        sources_count = len(r['sources'])
+        quotes_count = len(r['quotes'])
+        print(f"{r['id']:<4} {r['category']:<14} {r['verification']['score']:>5.1f}%    {sources_count:<8} {quotes_count:<8}   {r['confidence']:.3f}")
     
     # Сохранение результатов
     output = {
         "test_date": datetime.now().isoformat(),
-        "config": RERANK_CONFIG,
-        "avg_chunks_without": avg_chunks_without,
-        "avg_chunks_with": avg_chunks_with,
-        "avg_reduction_factor": avg_reduction_factor,
-        "avg_improvement_percent": avg_improvement_percent,
-        "total_chunks_without": total_chunks_without,
-        "total_chunks_with": total_chunks_with,
+        "model": MODEL,
+        "threshold": CONFIDENCE_THRESHOLD,
+        "summary": {
+            "total_questions": len(results),
+            "avg_score": round(avg_score, 1),
+            "has_sources_count": has_sources_count,
+            "has_quotes_count": has_quotes_count,
+            "unknown_correct": unknown_correct,
+            "unknown_total": unknown_total
+        },
         "results": results
     }
     
-    filename = f"rerank_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    filename = f"citations_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
     
     print(f"\n💾 Результаты сохранены: {filename}")
+    
+    # Финальный вердикт
+    print("\n" + "="*80)
+    print("🎯 ВЕРДИКТ:")
+    
+    if avg_score >= 80:
+        print("   ✅ ОТЛИЧНО! Агент корректно указывает источники и цитаты")
+        print("   📚 Анти-галлюцинации работают")
+    elif avg_score >= 60:
+        print("   ⚠️ ХОРОШО, но есть куда расти")
+        print("   🔧 Рекомендуется улучшить извлечение цитат")
+    else:
+        print("   ❌ ТРЕБУЕТ ДОРАБОТКИ")
+        print("   🔧 Проверьте качество чанков и промпт")
+    
+    return output
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--rerank", action="store_true", default=True)
+    parser.add_argument("--verify", action="store_true", default=True)
     args = parser.parse_args()
     
-    run_comparison()
+    run_verification()
