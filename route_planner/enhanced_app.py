@@ -393,7 +393,11 @@ def update_model(model_name: str):
         app_state.conversations_list = []
         app_state.current_conversation_id = None
     
-    return f"Модель: {model_name}", [], ""
+    # Возвращаем обновленные choices и value для dropdown
+    conversations_choices = get_conversations_choices(app_state.agent)
+    conv_value = get_current_conversation_value(app_state.agent)
+    
+    return f"Модель: {model_name}", gr.update(choices=conversations_choices), gr.update(value=conv_value), ""
 
 
 def reconnect_mcp():
@@ -621,7 +625,7 @@ with gr.Blocks(
     
     # ── Обработчики событий ─────────────────────────────────────────────
     
-    def handle_message(message: str, history: list, conv_dropdown_value: str):
+    def handle_message(message: str, history: list):
         """Обрабатывает сообщение пользователя."""
         if not message.strip():
             return (
@@ -629,9 +633,9 @@ with gr.Blocks(
                 format_mcp_calls(app_state.agent), 
                 "", 
                 get_mcp_status(),
-                get_conversations_list(app_state.agent),
-                get_current_conversation_info(app_state.agent),
-                conv_dropdown_value
+                get_conversations_choices(app_state.agent),
+                get_current_conversation_value(app_state.agent),
+                get_current_conversation_info(app_state.agent)
             )
         
         # Инициализация агента при первом сообщении
@@ -659,35 +663,32 @@ with gr.Blocks(
         # Обновляем отладку и статус
         debug = format_mcp_calls(app_state.agent)
         mcp_status_text = get_mcp_status()
-        conversations = get_conversations_list(app_state.agent)
+        conversations_choices = get_conversations_choices(app_state.agent)
+        conv_value = get_current_conversation_value(app_state.agent)
         conv_info = get_current_conversation_info(app_state.agent)
-        
-        # Обновляем значение dropdown текущего диалога
-        current_conv_id = str(app_state.current_conversation_id) if app_state.current_conversation_id else ""
-        conv_dropdown_value = current_conv_id
         
         return (
             new_history, 
             debug, 
             "", 
             mcp_status_text,
-            conversations,
-            conv_info,
-            conv_dropdown_value
+            conversations_choices,
+            conv_value,
+            conv_info
         )
     
     # Обработка сообщений
     msg_input.submit(
         fn=handle_message,
-        inputs=[msg_input, chatbot, conversations_dropdown],
-        outputs=[chatbot, debug_output, msg_input, mcp_status, conversations_dropdown, conversation_info, conversations_dropdown],
+        inputs=[msg_input, chatbot],
+        outputs=[chatbot, debug_output, msg_input, mcp_status, conversations_dropdown, conversations_dropdown, conversation_info],
         show_progress="minimal"
     )
     
     send_btn.click(
         fn=handle_message,
-        inputs=[msg_input, chatbot, conversations_dropdown],
-        outputs=[chatbot, debug_output, msg_input, mcp_status, conversations_dropdown, conversation_info, conversations_dropdown],
+        inputs=[msg_input, chatbot],
+        outputs=[chatbot, debug_output, msg_input, mcp_status, conversations_dropdown, conversations_dropdown, conversation_info],
         show_progress="minimal"
     )
     
@@ -695,20 +696,21 @@ with gr.Blocks(
     model_dropdown.change(
         fn=update_model,
         inputs=[model_dropdown],
-        outputs=[model_status, conversations_dropdown, conv_action_result]
+        outputs=[model_status, conversations_dropdown, conversations_dropdown, conv_action_result]
     )
     
     # Переключение диалога
     def on_switch_conversation(conv_dropdown_value: str):
         if not conv_dropdown_value:
-            return "❌ Выберите диалог из списка", gr.update()
+            return "❌ Выберите диалог из списка", [], "", gr.update(choices=[], value="")
         
         result = switch_conversation(app_state.agent, conv_dropdown_value)
-        conversations = get_conversations_list(app_state.agent)
+        conversations_choices = get_conversations_choices(app_state.agent)
+        conv_value = get_current_conversation_value(app_state.agent)
         conv_info = get_current_conversation_info(app_state.agent)
         
         # Очищаем историю чата при переключении диалога
-        return result, [], conv_info, gr.update(value=conversations)
+        return result, [], conv_info, gr.update(choices=conversations_choices, value=conv_value)
     
     switch_conv_btn.click(
         fn=on_switch_conversation,
@@ -719,11 +721,12 @@ with gr.Blocks(
     # Создание нового диалога
     def on_new_conversation():
         result = create_new_conversation(app_state.agent)
-        conversations = get_conversations_list(app_state.agent)
+        conversations_choices = get_conversations_choices(app_state.agent)
+        conv_value = get_current_conversation_value(app_state.agent)
         conv_info = get_current_conversation_info(app_state.agent)
         
         # Очищаем историю чата для нового диалога
-        return result, [], conv_info, gr.update(value=conversations)
+        return result, [], conv_info, gr.update(choices=conversations_choices, value=conv_value)
     
     new_conv_btn.click(
         fn=on_new_conversation,
@@ -732,8 +735,8 @@ with gr.Blocks(
     
     # Переподключение MCP
     reconnect_btn.click(
-        fn=lambda: (reconnect_mcp(), get_mcp_status(), [], ""),
-        outputs=[mcp_status, conversations_dropdown, conv_action_result]
+        fn=lambda: (reconnect_mcp(), get_mcp_status(), get_conversations_choices(app_state.agent), get_current_conversation_value(app_state.agent), ""),
+        outputs=[mcp_status, conversations_dropdown, conversations_dropdown, conv_action_result]
     )
     
     # Очистка текущего диалога
@@ -745,9 +748,10 @@ with gr.Blocks(
     # Удаление диалога
     def on_delete_conversation(conv_dropdown_value: str):
         result = delete_conversation(conv_dropdown_value)
-        conversations = get_conversations_list(app_state.agent)
+        conversations_choices = get_conversations_choices(app_state.agent)
+        conv_value = get_current_conversation_value(app_state.agent)
         conv_info = get_current_conversation_info(app_state.agent)
-        return result, gr.update(value=conversations), conv_info
+        return result, gr.update(choices=conversations_choices, value=conv_value), conv_info
     
     delete_conv_btn.click(
         fn=on_delete_conversation,
@@ -770,13 +774,14 @@ with gr.Blocks(
         
         return (
             get_mcp_status(),
-            get_conversations_list(app_state.agent),
+            get_conversations_choices(app_state.agent),
+            get_current_conversation_value(app_state.agent),
             get_current_conversation_info(app_state.agent)
         )
     
     demo.load(
         fn=on_load,
-        outputs=[mcp_status, conversations_dropdown, conversation_info]
+        outputs=[mcp_status, conversations_dropdown, conversations_dropdown, conversation_info]
     )
     
     # Обновление информации о диалоге при изменении выбора

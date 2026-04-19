@@ -24,10 +24,10 @@ def test_ui_init():
     print(f"  RAG доступен: {app_state.rag_available}")
     
     # Проверяем список диалогов
-    conversations = get_conversations_list(agent)
+    conversations = get_conversations_choices(agent)
     print(f"✅ Список диалогов: {len(conversations)} диалогов")
     
-    for title, conv_id in conversations:
+    for title, conv_id in conversations[:3]:  # Покажем первые 3
         print(f"  - {title} (ID: {conv_id})")
     
     # Проверяем информацию о текущем диалоге
@@ -41,7 +41,7 @@ def test_ui_init():
     print(f"✅ Создание нового диалога: {result}")
     
     # Обновляем список диалогов
-    conversations = get_conversations_list(agent)
+    conversations = get_conversations_choices(agent)
     print(f"✅ Обновленный список диалогов: {len(conversations)} диалогов")
     
     # Проверяем переключение диалогов
