@@ -171,6 +171,13 @@ def get_conversations_choices(agent: Optional[EnhancedRoutePlannerAgent]) -> Lis
     return formatted
 
 
+def get_conversations_list(agent: Optional[EnhancedRoutePlannerAgent]) -> List[Tuple[str, str]]:
+    """
+    Alias for get_conversations_choices for backward compatibility.
+    """
+    return get_conversations_choices(agent)
+
+
 def get_current_conversation_value(agent: Optional[EnhancedRoutePlannerAgent]) -> str:
     """
     Получает текущее значение для выпадающего списка диалогов.
@@ -285,8 +292,22 @@ def get_current_conversation_info(agent: Optional[EnhancedRoutePlannerAgent]) ->
         
         # Получаем статистику суммаризации
         from conversation_manager import get_conversation_manager
+        from summarizer import get_summarizer
         manager = get_conversation_manager()
+        summarizer = get_summarizer(manager)
         should_summarize, user_count = manager.should_summarize(conversation.id)
+        
+        # Получаем фактическую суммаризацию
+        summary = summarizer.get_summary_for_conversation(conversation.id)
+        
+        if summary:
+            lines.append("📋 **Последняя суммаризация:**")
+            # Обрезаем длинную суммаризацию
+            if len(summary) > 200:
+                lines.append(f"   {summary[:197]}...")
+            else:
+                lines.append(f"   {summary}")
+            lines.append("")
         
         if user_count >= 10:
             if should_summarize:
@@ -319,56 +340,8 @@ def get_current_conversation_info(agent: Optional[EnhancedRoutePlannerAgent]) ->
         return f"❌ Ошибка получения информации: {e}"
 
 
-def chat_response(message: str, history: list) -> Tuple[list, str, bool, str, list, str]:
-    """
-    Обрабатывает сообщение пользователя и возвращает ответ.
-    
-    Returns:
-        Tuple (updated_history, debug_log, processing_complete, mcp_status, conversations_list, conv_info)
-    """
-    if not message.strip():
-        return (
-            history, 
-            format_mcp_calls(app_state.agent), 
-            True,
-            get_mcp_status(),
-            get_conversations_list(app_state.agent),
-            get_current_conversation_info(app_state.agent)
-        )
-    
-    # Инициализация агента при первом сообщении
-    if not app_state.agent:
-        agent, success = init_agent(app_state.selected_model)
-        app_state.agent = agent
-        app_state.mcp_connected = success
-    
-    # Получаем ответ от агента
-    response = process_message(app_state.agent, message)
-    
-    # Синхронизируем статус MCP с реальным состоянием агента
-    app_state.mcp_connected = app_state.agent.state.mcp_available if app_state.agent else False
-    
-    # Форматируем ответ для Gradio Chatbot (messages format)
-    new_history = history + [
-        {"role": "user", "content": message},
-        {"role": "assistant", "content": response}
-    ]
-    
-    # Обновляем отладку
-    debug = format_mcp_calls(app_state.agent)
-    
-    # Обновляем список диалогов и информацию о текущем диалоге
-    conversations = get_conversations_list(app_state.agent)
-    conv_info = get_current_conversation_info(app_state.agent)
-    
-    return (
-        new_history, 
-        debug, 
-        True,
-        get_mcp_status(),
-        conversations,
-        conv_info
-    )
+# Note: chat_response function is not used in this enhanced_app.py
+# It's kept for reference but handle_message is the active message handler
 
 
 def update_model(model_name: str):
@@ -394,10 +367,10 @@ def update_model(model_name: str):
         app_state.current_conversation_id = None
     
     # Возвращаем обновленные choices и value для dropdown
-    conversations_choices = get_conversations_choices(app_state.agent)
-    conv_value = get_current_conversation_value(app_state.agent)
-    
-    return f"Модель: {model_name}", gr.update(choices=conversations_choices), gr.update(value=conv_value), ""
+    return f"Модель: {model_name}", gr.update(
+        choices=get_conversations_choices(app_state.agent),
+        value=get_current_conversation_value(app_state.agent)
+    ), ""
 
 
 def reconnect_mcp():
@@ -633,8 +606,10 @@ with gr.Blocks(
                 format_mcp_calls(app_state.agent), 
                 "", 
                 get_mcp_status(),
-                get_conversations_choices(app_state.agent),
-                get_current_conversation_value(app_state.agent),
+                gr.update(
+                    choices=get_conversations_choices(app_state.agent),
+                    value=get_current_conversation_value(app_state.agent)
+                ),
                 get_current_conversation_info(app_state.agent)
             )
         
@@ -663,8 +638,6 @@ with gr.Blocks(
         # Обновляем отладку и статус
         debug = format_mcp_calls(app_state.agent)
         mcp_status_text = get_mcp_status()
-        conversations_choices = get_conversations_choices(app_state.agent)
-        conv_value = get_current_conversation_value(app_state.agent)
         conv_info = get_current_conversation_info(app_state.agent)
         
         return (
@@ -672,8 +645,10 @@ with gr.Blocks(
             debug, 
             "", 
             mcp_status_text,
-            conversations_choices,
-            conv_value,
+            gr.update(
+                choices=get_conversations_choices(app_state.agent),
+                value=get_current_conversation_value(app_state.agent)
+            ),
             conv_info
         )
     
@@ -681,14 +656,14 @@ with gr.Blocks(
     msg_input.submit(
         fn=handle_message,
         inputs=[msg_input, chatbot],
-        outputs=[chatbot, debug_output, msg_input, mcp_status, conversations_dropdown, conversations_dropdown, conversation_info],
+        outputs=[chatbot, debug_output, msg_input, mcp_status, conversations_dropdown, conversation_info],
         show_progress="minimal"
     )
     
     send_btn.click(
         fn=handle_message,
         inputs=[msg_input, chatbot],
-        outputs=[chatbot, debug_output, msg_input, mcp_status, conversations_dropdown, conversations_dropdown, conversation_info],
+        outputs=[chatbot, debug_output, msg_input, mcp_status, conversations_dropdown, conversation_info],
         show_progress="minimal"
     )
     
@@ -696,7 +671,7 @@ with gr.Blocks(
     model_dropdown.change(
         fn=update_model,
         inputs=[model_dropdown],
-        outputs=[model_status, conversations_dropdown, conversations_dropdown, conv_action_result]
+        outputs=[model_status, conversations_dropdown, conv_action_result]
     )
     
     # Переключение диалога
@@ -735,8 +710,11 @@ with gr.Blocks(
     
     # Переподключение MCP
     reconnect_btn.click(
-        fn=lambda: (reconnect_mcp(), get_mcp_status(), get_conversations_choices(app_state.agent), get_current_conversation_value(app_state.agent), ""),
-        outputs=[mcp_status, conversations_dropdown, conversations_dropdown, conv_action_result]
+        fn=lambda: (reconnect_mcp(), get_mcp_status(), gr.update(
+            choices=get_conversations_choices(app_state.agent),
+            value=get_current_conversation_value(app_state.agent)
+        ), ""),
+        outputs=[mcp_status, conversations_dropdown, conv_action_result]
     )
     
     # Очистка текущего диалога
@@ -774,14 +752,16 @@ with gr.Blocks(
         
         return (
             get_mcp_status(),
-            get_conversations_choices(app_state.agent),
-            get_current_conversation_value(app_state.agent),
+            gr.update(
+                choices=get_conversations_choices(app_state.agent),
+                value=get_current_conversation_value(app_state.agent)
+            ),
             get_current_conversation_info(app_state.agent)
         )
     
     demo.load(
         fn=on_load,
-        outputs=[mcp_status, conversations_dropdown, conversations_dropdown, conversation_info]
+        outputs=[mcp_status, conversations_dropdown, conversation_info]
     )
     
     # Обновление информации о диалоге при изменении выбора
