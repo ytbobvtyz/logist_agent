@@ -11,3 +11,4 @@ deepseek*
 DEEPSEEK*
 faiss_index*
 data/
+conversations.db

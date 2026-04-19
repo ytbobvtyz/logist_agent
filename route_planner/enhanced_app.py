@@ -136,12 +136,12 @@ def format_mcp_calls(agent: Optional[EnhancedRoutePlannerAgent]) -> str:
     return "\n".join(lines)
 
 
-def get_conversations_list(agent: Optional[EnhancedRoutePlannerAgent]) -> List[Tuple[str, str]]:
+def get_conversations_choices(agent: Optional[EnhancedRoutePlannerAgent]) -> List[Tuple[str, str]]:
     """
-    Получает список диалогов для отображения в UI.
+    Получает список диалогов для выпадающего списка.
     
     Returns:
-        Список кортежей (title, id)
+        Список кортежей (отображаемый_текст, id_диалога)
     """
     if not agent:
         return []
@@ -153,7 +153,7 @@ def get_conversations_list(agent: Optional[EnhancedRoutePlannerAgent]) -> List[T
     formatted = []
     for conv in conversations:
         # Добавляем иконку активности
-        prefix = "● " if conv.get('active') else "○ "
+        prefix = "● " if conv['active'] else "○ "
         
         # Обрезаем длинные заголовки
         title = conv['title']
@@ -161,13 +161,27 @@ def get_conversations_list(agent: Optional[EnhancedRoutePlannerAgent]) -> List[T
             title = title[:27] + "..."
         
         # Добавляем информацию о сообщениях
-        msg_count = conv.get('message_count', 0)
+        msg_count = conv['message_count']
         if msg_count > 0:
             title = f"{title} ({msg_count} сообщ.)"
         
-        formatted.append((f"{prefix}{title}", str(conv['id'])))
+        conv_id_str = str(conv['id'])
+        formatted.append((f"{prefix}{title}", conv_id_str))
     
     return formatted
+
+
+def get_current_conversation_value(agent: Optional[EnhancedRoutePlannerAgent]) -> str:
+    """
+    Получает текущее значение для выпадающего списка диалогов.
+    
+    Returns:
+        ID текущего диалога в виде строки
+    """
+    if not agent or not app_state.current_conversation_id:
+        return ""
+    
+    return str(app_state.current_conversation_id)
 
 
 def switch_conversation(agent: Optional[EnhancedRoutePlannerAgent], conv_id_str: str) -> str:
@@ -650,10 +664,7 @@ with gr.Blocks(
         
         # Обновляем значение dropdown текущего диалога
         current_conv_id = str(app_state.current_conversation_id) if app_state.current_conversation_id else ""
-        for conv_title, conv_id in conversations:
-            if conv_id == current_conv_id:
-                conv_dropdown_value = conv_id
-                break
+        conv_dropdown_value = current_conv_id
         
         return (
             new_history, 
@@ -744,13 +755,27 @@ with gr.Blocks(
         outputs=[conv_action_result, conversations_dropdown, conversation_info]
     )
     
-    # Авто-обновление при загрузке
-    demo.load(
-        fn=lambda: (
+    # Инициализация при загрузке
+    def on_load():
+        """Инициализация при загрузке страницы."""
+        # Инициализируем агента если еще не инициализирован
+        if not app_state.agent:
+            agent, success = init_agent(app_state.selected_model)
+            app_state.agent = agent
+            app_state.mcp_connected = success
+            
+            # Обновляем статус RAG
+            if app_state.agent:
+                app_state.rag_available = app_state.agent.rag_retriever is not None
+        
+        return (
             get_mcp_status(),
             get_conversations_list(app_state.agent),
             get_current_conversation_info(app_state.agent)
-        ),
+        )
+    
+    demo.load(
+        fn=on_load,
         outputs=[mcp_status, conversations_dropdown, conversation_info]
     )
     
