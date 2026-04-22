@@ -1,0 +1,35 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies for development
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy development requirements
+COPY pyproject.toml README.md ./
+
+# Install development dependencies (including dev extras)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir ".[dev,ui,rag,mcp]"
+
+# Copy application code
+COPY app/ app/
+COPY core/ core/
+COPY services/ services/
+COPY utils/ utils/
+COPY tests/ tests/
+
+# Create non-root user
+RUN useradd -m -u 1000 devuser && chown -R devuser:devuser /app
+USER devuser
+
+# Expose port for development
+EXPOSE 7860
+
+# Default command for development with hot reload
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860", "--reload"]

@@ -1,0 +1,31 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies for testing
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements for testing
+COPY pyproject.toml README.md ./
+
+# Install testing dependencies (including dev extras)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir ".[dev]"
+
+# Copy application code
+COPY app/ app/
+COPY core/ core/
+COPY services/ services/
+COPY utils/ utils/
+COPY tests/ tests/
+
+# Create test user
+RUN useradd -m -u 1000 testuser && chown -R testuser:testuser /app
+USER testuser
+
+# Run tests
+CMD ["pytest", "tests/", "-v", "--cov=app", "--cov=core", "--cov=services", "--cov-report=html", "--cov-report=term"]

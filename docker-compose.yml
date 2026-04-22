@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  logsit-agent:
+    build: .
+    ports:
+      - "7860:7860"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MCP_SERVERS=${MCP_SERVERS:-""}
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  logsit-agent-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "7861:7860"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOG_LEVEL=DEBUG
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - .:/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: uvicorn app.main:app --host 0.0.0.0 --port 7860 --reload
+
+  logsit-agent-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    environment:
+      - OPENAI_API_KEY=test-key
+      - TEST_MODE=true
+    volumes:
+      - .:/app
+    command: pytest tests/ -v
