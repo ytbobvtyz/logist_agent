@@ -3,6 +3,7 @@
 - Множества диалогов с переключением
 - Автоматической суммаризации каждые 10 сообщений
 - Task State (памяти задачи)
+- Локальной модели Ollama
 """
 
 import json
@@ -24,12 +25,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from conversation_manager import ConversationManager, Message, get_conversation_manager
 from summarizer import Summarizer, get_summarizer
 from task_state import TaskStateManager, get_task_state_manager
+from llm_client import create_llm_client, LLMClient
 
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# Базовый системный промпт
-BASE_SYSTEM_PROMPT = """Ты умный логист-ассистент. У тебя есть инструменты:
+# Базовый системный промпт для OpenRouter (с MCP)
+BASE_SYSTEM_PROMPT_MCP = """Ты умный логист-ассистент. У тебя есть инструменты:
 
 ## MCP ИНСТРУМЕНТЫ (для расчётов):
 - mcp_geocode_batch - координаты городов
@@ -60,6 +62,28 @@ BASE_SYSTEM_PROMPT = """Ты умный логист-ассистент. У те
 
 Если пользователь не указал города или указал менее двух, попроси уточнить.
 Если город не найден, сообщи об этом пользователю."""
+
+# Базовый системный промпт для локальной модели (без MCP)
+BASE_SYSTEM_PROMPT_LOCAL = """Ты умный логист-ассистент.
+
+## ИНСТРУМЕНТЫ:
+- RAG (поиск в документах) - можешь искать информацию в документах (тарифы, правила, постановления)
+- Собственные знания - для ответов на общие вопросы
+
+## ПРАВИЛА РАБОТЫ:
+1. Если вопрос про **правила, обязанности, тарифы из документов, API ПЭК** → система сама найдет информацию в документах
+2. Если вопрос про **общие понятия логистики** → отвечай из своих знаний
+3. Если вопрос про **расстояния, маршруты, расчеты** → объясни, что это требует инструментов MCP, которые недоступны в локальном режиме
+
+## ФОРМАТ ОТВЕТА:
+- Если система нашла информацию в документах: укажи 📚 RAG + источник
+- Если отвечаешь из знаний: укажи 💡
+
+## ОГРАНИЧЕНИЯ:
+- MCP инструменты недоступны в локальном режиме
+- Могу ответить только на вопросы, не требующие точных расчетов
+
+Будь полезным и честным. Если не знаешь ответа, скажи об этом."""
 
 
 @dataclass
@@ -207,21 +231,37 @@ class MCPOrchestrator:
 class EnhancedRoutePlannerAgent:
     """Расширенный агент с поддержкой диалогов, суммаризации и task state."""
     
-    def __init__(self, model: str = "openrouter/auto", db_path: str = "conversations.db"):
+    def __init__(self, model: str = "openrouter/auto", use_local: bool = False, db_path: str = "conversations.db"):
         """
         Инициализация расширенного агента.
         
         Args:
-            model: Название модели OpenRouter
+            model: Название модели
+            use_local: Использовать локальную модель Ollama
             db_path: Путь к базе данных диалогов
         """
         self.model = model
-        self.client = AsyncOpenAI(
-            api_key=OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1",
-            timeout=120.0,
-            max_retries=2
-        )
+        self.use_local = use_local
+        
+        # Создаем клиент LLM через абстрактный слой
+        self.llm_client = create_llm_client(model, use_local)
+        
+        # Для обратной совместимости оставляем self.client
+        if use_local:
+            # Для локальной модели используем Ollama-совместимый клиент
+            self.client = AsyncOpenAI(
+                base_url=os.getenv("OLLAMA_URL", "http://localhost:11434") + "/v1",
+                api_key="ollama",
+                timeout=120.0
+            )
+        else:
+            self.client = AsyncOpenAI(
+                api_key=OPENROUTER_API_KEY,
+                base_url="https://openrouter.ai/api/v1",
+                timeout=120.0,
+                max_retries=2
+            )
+        
         self.orchestrator = MCPOrchestrator()
         self.state = AgentState()
         self.rag_retriever = None
@@ -238,8 +278,16 @@ class EnhancedRoutePlannerAgent:
         # Инициализация RAG retriever
         self._init_rag_retriever()
         
-        print(f"✅ Инициализирован расширенный агент. Текущий диалог: #{self.current_conversation.id}")
+        model_type = "локальная (Ollama)" if use_local else "OpenRouter"
+        print(f"✅ Инициализирован расширенный агент. Модель: {model_type} ({self.model}). Текущий диалог: #{self.current_conversation.id}")
     
+    def _get_system_prompt(self) -> str:
+        """Возвращает системный промпт в зависимости от типа модели."""
+        if self.use_local:
+            return BASE_SYSTEM_PROMPT_LOCAL
+        else:
+            return BASE_SYSTEM_PROMPT_MCP
+
     def _init_rag_retriever(self):
         """Инициализирует RAG retriever."""
         try:
@@ -412,17 +460,17 @@ class EnhancedRoutePlannerAgent:
                     if callback:
                         await callback(f"📄 Найдено {len(chunks)} релевантных фрагментов")
                     
-                    response = await self._call_llm_with_context(rag_prompt, context)
+                    response_text = await self._call_llm_with_context(rag_prompt, context)
                     
-                    answer = response.choices[0].message.content or "Не удалось получить ответ"
+                    answer = response_text or "Не удалось получить ответ"
                     sources = ", ".join(set(chunk['filename'] for chunk in chunks))
                     final_response = f"📚 RAG (источники: {sources})\n\n{answer}"
                 else:
                     # Если ничего не найдено
                     prompt = self._build_basic_prompt(user_message, context)
-                    response = await self._call_llm_with_context(prompt, context)
+                    response_text = await self._call_llm_with_context(prompt, context)
                     
-                    answer = response.choices[0].message.content or "Не удалось получить ответ"
+                    answer = response_text or "Не удалось получить ответ"
                     final_response = f"💡 (RAG ничего не нашёл, использованы знания)\n\n{answer}"
                 
                 # Сохраняем ответ ассистента
@@ -506,7 +554,7 @@ class EnhancedRoutePlannerAgent:
         
         return "\n\n".join(prompt_parts)
     
-    async def _call_llm_with_context(self, user_prompt: str, context: str = "") -> Any:
+    async def _call_llm_with_context(self, user_prompt: str, context: str = "") -> str:
         """
         Вызывает LLM с учетом контекста.
         
@@ -515,45 +563,54 @@ class EnhancedRoutePlannerAgent:
             context: Контекст диалога
             
         Returns:
-            Ответ LLM
+            Ответ LLM (текст)
         """
         # Формируем полный системный промпт
         if context:
-            system_prompt = f"""{BASE_SYSTEM_PROMPT}
+            system_prompt = f"""{self._get_system_prompt()}
 
 ## КОНТЕКСТ ТЕКУЩЕГО ДИАЛОГА:
 {context}
 
 Учитывай этот контекст при ответе."""
         else:
-            system_prompt = BASE_SYSTEM_PROMPT
+            system_prompt = self._get_system_prompt()
         
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
         
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=1024
-        )
+        response = await self.llm_client.chat_completion(messages, max_tokens=1024)
+        return response.get("content", "")
+
+    async def _process_without_tools(self, user_message: str, context: str,
+                                   conversation_id: int, callback=None) -> str:
+        """Обрабатывает сообщение без использования MCP инструментов."""
+        if self.use_local and callback:
+            await callback("💡 Использую локальную модель без инструментов")
         
-        return response
+        return await self._call_llm_with_context(user_message, context)
     
     async def _process_with_mcp(self, user_message: str, context: str, 
                                conversation_id: int, callback=None) -> str:
         """Обрабатывает сообщение с использованием MCP инструментов."""
+        # Проверяем, доступны ли MCP инструменты для локальной модели
+        if self.use_local:
+            if callback:
+                await callback("⚠️ Локальная модель не поддерживает инструменты MCP. Использую режим RAG/знаний.")
+            return await self._process_without_tools(user_message, context, conversation_id, callback)
+        
         # Формируем полный промпт
         if context:
-            system_prompt = f"""{BASE_SYSTEM_PROMPT}
+            system_prompt = f"""{self._get_system_prompt()}
 
 ## КОНТЕКСТ ТЕКУЩЕГО ДИАЛОГА:
 {context}
 
 Учитывай этот контекст при выборе инструментов и формировании ответа."""
         else:
-            system_prompt = BASE_SYSTEM_PROMPT
+            system_prompt = self._get_system_prompt()
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -563,67 +620,38 @@ class EnhancedRoutePlannerAgent:
         mcp_tools = self.orchestrator.get_all_tools() if self.state.mcp_available else []
         
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
+            response = await self.llm_client.chat_completion(
                 messages=messages,
                 tools=mcp_tools if mcp_tools else None,
                 max_tokens=1024
             )
             
-            assistant_message = response.choices[0].message
+            assistant_content = response.get("content", "")
+            tool_calls = response.get("tool_calls", [])
+            
             max_iterations = 10
             iteration_count = 0
             
-            while assistant_message.tool_calls and iteration_count < max_iterations:
+            while tool_calls and iteration_count < max_iterations:
                 iteration_count += 1
                 
-                if hasattr(assistant_message, 'tool_calls') and assistant_message.tool_calls:
-                    tool_calls_list = []
-                    for tc in assistant_message.tool_calls:
-                        try:
-                            if hasattr(tc, 'function'):
-                                if hasattr(tc.function, 'name') and hasattr(tc.function, 'arguments'):
-                                    tool_calls_list.append({
-                                        "id": tc.id if hasattr(tc, 'id') else str(hash(tc)),
-                                        "type": "function",
-                                        "function": {
-                                            "name": tc.function.name,
-                                            "arguments": tc.function.arguments
-                                        }
-                                    })
-                                else:
-                                    tool_data = getattr(tc, 'function', {})
-                                    tool_calls_list.append({
-                                        "id": tc.id if hasattr(tc, 'id') else str(hash(tc)),
-                                        "type": "function",
-                                        "function": {
-                                            "name": tool_data.get('name', 'unknown'),
-                                            "arguments": tool_data.get('arguments', '{}')
-                                        }
-                                    })
-                        except Exception as e:
-                            print(f"⚠️ Ошибка обработки tool_call: {e}")
-                            continue
-                    
-                    messages.append({
-                        "role": "assistant",
-                        "content": assistant_message.content or "",
-                        "tool_calls": tool_calls_list
-                    })
+                # Добавляем сообщение ассистента с вызовами инструментов
+                messages.append({
+                    "role": "assistant",
+                    "content": assistant_content or "",
+                    "tool_calls": tool_calls
+                })
                 
-                for tool_call in assistant_message.tool_calls:
+                for tool_call in tool_calls:
                     tool_name = None
                     arguments = {}
+                    tool_call_id = tool_call.get("id", str(hash(str(tool_call))))
                     
                     try:
-                        if hasattr(tool_call, 'function'):
-                            if hasattr(tool_call.function, 'name') and hasattr(tool_call.function, 'arguments'):
-                                tool_name = tool_call.function.name
-                                arguments = json.loads(tool_call.function.arguments)
-                            else:
-                                tool_data = getattr(tool_call, 'function', {})
-                                tool_name = tool_data.get('name', '')
-                                arguments = json.loads(tool_data.get('arguments', '{}'))
+                        tool_func = tool_call.get("function", {})
+                        tool_name = tool_func.get("name", "")
+                        arguments_str = tool_func.get("arguments", "{}")
+                        arguments = json.loads(arguments_str)
                     except Exception as e:
                         print(f"⚠️ Ошибка извлечения данных из tool_call: {e}")
                         tool_name = "unknown"
@@ -643,19 +671,20 @@ class EnhancedRoutePlannerAgent:
                     
                     messages.append({
                         "role": "tool",
-                        "tool_call_id": tool_call.id,
+                        "tool_call_id": tool_call_id,
                         "content": tool_result
                     })
                 
-                response = await self.client.chat.completions.create(
-                    model=self.model,
+                # Получаем новый ответ от LLM
+                next_response = await self.llm_client.chat_completion(
                     messages=messages,
                     tools=mcp_tools if mcp_tools else None,
                     max_tokens=1024
                 )
-                assistant_message = response.choices[0].message
+                assistant_content = next_response.get("content", "")
+                tool_calls = next_response.get("tool_calls", [])
             
-            if iteration_count >= max_iterations and assistant_message.tool_calls:
+            if iteration_count >= max_iterations and tool_calls:
                 final_response = "❌ Превышено максимальное количество итераций. Возможно, проблема с интерпретацией запроса."
                 self.conversation_manager.add_message(
                     conversation_id=conversation_id,
@@ -664,7 +693,7 @@ class EnhancedRoutePlannerAgent:
                 )
                 return final_response
             
-            final_response = assistant_message.content or "Не удалось получить ответ"
+            final_response = assistant_content or "Не удалось получить ответ"
             
             # Добавляем информацию о статусе MCP
             prefix = "🔧 MCP"

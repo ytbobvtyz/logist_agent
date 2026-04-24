@@ -1,0 +1,202 @@
+Metadata-Version: 2.4
+Name: logsit-agent
+Version: 0.1.0
+Summary: AI agent for logging and conversation management with MCP support
+Author-email: Logsit Team <team@logsit.ai>
+License: MIT
+Project-URL: Homepage, https://github.com/yourusername/logsit-agent
+Project-URL: Documentation, https://logsit-agent.readthedocs.io
+Project-URL: Repository, https://github.com/yourusername/logsit-agent
+Project-URL: Issues, https://github.com/yourusername/logsit-agent/issues
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: pydantic<3.0.0,>=2.12.5
+Requires-Dist: fastapi<1.0.0,>=0.135.3
+Requires-Dist: uvicorn<1.0.0,>=0.44.0
+Requires-Dist: openai<3.0.0,>=2.31.0
+Requires-Dist: aiofiles<25.0.0,>=24.1.0
+Requires-Dist: python-dotenv<2.0.0,>=1.2.2
+Requires-Dist: rich<15.0.0,>=14.3.3
+Requires-Dist: tenacity<10.0.0,>=9.1.4
+Provides-Extra: mcp
+Requires-Dist: mcp<2.0.0,>=1.27.0; extra == "mcp"
+Requires-Dist: protobuf<8.0.0,>=7.34.1; extra == "mcp"
+Provides-Extra: rag
+Requires-Dist: sentence-transformers<4.0.0,>=3.4.1; extra == "rag"
+Requires-Dist: faiss-cpu<2.0.0,>=1.9.0; extra == "rag"
+Requires-Dist: numpy<3.0.0,>=2.2.6; extra == "rag"
+Requires-Dist: pandas<3.0.0,>=2.3.3; extra == "rag"
+Provides-Extra: ui
+Requires-Dist: gradio<7.0.0,>=6.11.0; extra == "ui"
+Requires-Dist: streamlit<2.0.0,>=1.56.0; extra == "ui"
+Provides-Extra: dev
+Requires-Dist: pytest<8.0.0,>=7.0.0; extra == "dev"
+Requires-Dist: pytest-asyncio<1.0.0,>=0.21.0; extra == "dev"
+Requires-Dist: httpx<1.0.0,>=0.28.1; extra == "dev"
+Requires-Dist: black<24.0.0,>=23.0.0; extra == "dev"
+Requires-Dist: ruff<0.5.0,>=0.4.0; extra == "dev"
+Requires-Dist: mypy<2.0.0,>=1.8.0; extra == "dev"
+Provides-Extra: full
+Requires-Dist: logsit-agent[dev,mcp,rag,ui]; extra == "full"
+
+# Logsit Agent 🗺️
+
+Умный логистический ассистент с поддержкой множества диалогов, автосуммаризацией и памятью задачи.
+
+## 🚀 Быстрый старт
+
+### Установка зависимостей
+
+```bash
+# Убедитесь, что установлены все зависимости
+pip install -r requirements.txt
+```
+
+### Настройка API ключей
+
+Создайте файл `.env` в корне проекта:
+
+```env
+# Обязательные ключи
+OPENROUTER_API_KEY=sk-or-v1-ваш_ключ_openrouter
+
+# Опциональные ключи
+YANDEX_MAPS_API_KEY=ваш_ключ_yandex
+```
+
+### Запуск приложения
+
+```bash
+python app/main.py
+```
+
+Приложение будет доступно по адресу: http://localhost:7872
+
+## ✨ Возможности
+
+### 📋 Основные функции
+- **Множество диалогов** - создавайте и переключайтесь между разными задачами
+- **Автосуммаризация** - каждые 10 сообщений создается краткая сводка
+- **Память задачи** - система отслеживает цель диалога и уточнения
+- **Интеграция MCP** - расчеты маршрутов и стоимости доставки
+- **RAG поиск** - поиск информации в документах перевозчиков
+
+### 🛠️ Технологии
+- **LLM**: OpenRouter API с поддержкой различных моделей
+- **MCP**: Model Context Protocol для инструментов расчета
+- **RAG**: Векторный поиск по документам (FAISS + Sentence Transformers)
+- **UI**: Gradio с современным интерфейсом
+- **База данных**: SQLite для хранения диалогов и сообщений
+
+## 📁 Структура проекта
+
+```
+logsit_agent/
+├── app/                    # Веб-приложение
+│   ├── components/        # Компоненты UI
+│   ├── handlers/         # Обработчики событий
+│   └── main.py           # Главное приложение
+├── core/                  # Бизнес-логика
+│   ├── agent.py          # Основной агент
+│   ├── conversation_manager.py  # Управление диалогами
+│   ├── summarizer.py     # Автосуммаризация
+│   └── task_state.py     # Память задачи
+├── services/             # Внешние сервисы
+│   ├── mcp_orchestrator.py  # Управление MCP серверами
+│   └── rag_service.py    # RAG поиск
+├── utils/                # Вспомогательные функции
+│   ├── config.py        # Конфигурация приложения
+│   ├── async_helpers.py # Асинхронные утилиты
+│   └── database.py      # Работа с базой данных
+├── docs/                # Документация
+├── tests/               # Тесты
+├── requirements.txt     # Зависимости
+└── .env.example        # Шаблон конфигурации
+```
+
+## 📖 Документация
+
+Подробная документация доступна в папке `docs/`:
+
+- [📋 Полное руководство](docs/USER_GUIDE.md)
+- [🏗️ Архитектура системы](docs/ARCHITECTURE.md)
+- [🔧 API документация](docs/API.md)
+- [🚀 Развертывание](docs/DEPLOYMENT.md)
+
+## 🎯 Использование
+
+### Интерфейс
+- **Левая панель**: Управление диалогами и настройки
+- **Правая панель**: Чат с ассистентом
+- **Создание диалогов**: Кнопка "➕ Новый диалог"
+- **Переключение**: Dropdown со списком всех диалогов
+
+### Примеры запросов
+1. **Расчет маршрута**: "Найди оптимальный маршрут между Москвой, Санкт-Петербургом и Казанью"
+2. **Поиск в документах**: "Какие тарифы на доставку до 50 кг?"
+3. **Уточнение задачи**: "Добавь срок доставки 2 дня и вес 100 кг"
+
+## 🔧 Конфигурация
+
+Настройки приложения в файле `.env`:
+
+```env
+# API ключи
+OPENROUTER_API_KEY=ваш_ключ
+YANDEX_MAPS_API_KEY=ваш_ключ_yandex
+
+# Настройки приложения
+APP_HOST=0.0.0.0
+APP_PORT=7872
+DEBUG=false
+
+# База данных
+DATABASE_URL=sqlite:///conversations.db
+
+# MCP серверы
+MCP_SERVERS={"route_planner": "python route_planner/mcp_server.py"}
+```
+
+## 🧪 Тестирование
+
+```bash
+# Запуск тестов
+pytest tests/
+
+# Проверка работы RAG
+python -m tests.test_rag
+
+# Тестирование диалогов
+python -m tests.test_conversations
+```
+
+## 🤝 Вклад в проект
+
+1. Форкните репозиторий
+2. Создайте ветку для вашей функции (`git checkout -b feature/amazing-feature`)
+3. Закоммитьте изменения (`git commit -m 'Add amazing feature'`)
+4. Запушьте в ветку (`git push origin feature/amazing-feature`)
+5. Откройте Pull Request
+
+## 📄 Лицензия
+
+Распространяется под лицензией MIT. Смотрите файл `LICENSE` для подробностей.
+
+## 🆘 Поддержка
+
+Для сообщений об ошибках и предложений:
+1. Проверьте документацию в `docs/`
+2. Создайте issue в репозитории
+3. Опишите проблему с подробными шагами для воспроизведения
+
+---
+
+**Logsit Agent** - умный помощник для логистических задач с современной архитектурой и расширенными возможностями.

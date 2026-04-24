@@ -1,0 +1,3 @@
+[console_scripts]
+logsit-agent = app.main:run
+logsit-cli = cli.main:cli

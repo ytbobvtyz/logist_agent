@@ -441,21 +441,45 @@ def get_mcp_status() -> str:
     if not app_state.agent:
         return "❌ Агент не инициализирован"
     
-    # Получаем статус всех серверов
-    servers = []
-    if app_state.agent.orchestrator.sessions:
-        for server_name in app_state.agent.orchestrator.sessions.keys():
-            servers.append(f"✅ {server_name}")
+    # Проверяем, используется ли локальная модель
+    if hasattr(app_state.agent, 'use_local') and app_state.agent.use_local:
+        model_type = "локальная (Ollama)"
+        mcp_status_text = "❌ MCP недоступен (локальная модель не поддерживает инструменты)"
+    else:
+        model_type = "OpenRouter"
+        
+        # Получаем статус всех серверов
+        servers = []
+        if app_state.agent.orchestrator.sessions:
+            for server_name in app_state.agent.orchestrator.sessions.keys():
+                servers.append(f"✅ {server_name}")
+        
+        if servers:
+            mcp_status_text = "✅ MCP подключен"
+        else:
+            mcp_status_text = "❌ MCP не подключен"
     
     # Добавляем статус RAG
     rag_status = "✅ RAG доступен" if app_state.rag_available else "❌ RAG недоступен"
     
     result = []
-    if servers:
-        result.append("📡 MCP серверы:")
-        result.extend(servers)
-    else:
-        result.append("📡 MCP серверы: ❌ Нет подключенных серверов")
+    
+    # Информация о модели
+    result.append(f"🤖 Модель: {model_type}")
+    if hasattr(app_state.agent, 'model'):
+        result.append(f"  Название: {app_state.agent.model}")
+    
+    result.append("")
+    
+    # Статус MCP
+    result.append("📡 MCP статус:")
+    result.append(f"  {mcp_status_text}")
+    
+    if not (hasattr(app_state.agent, 'use_local') and app_state.agent.use_local):
+        if app_state.agent.orchestrator.sessions:
+            result.append("  Серверы:")
+            for server_name in app_state.agent.orchestrator.sessions.keys():
+                result.append(f"    ✅ {server_name}")
     
     result.append("")
     result.append("🔍 RAG статус:")
@@ -472,6 +496,82 @@ def get_mcp_status() -> str:
             pass
     
     return "\n".join(result)
+
+
+def update_model_ui(use_local: bool, current_model: str = None) -> Dict:
+    """
+    Обновляет UI для выбора модели в зависимости от режима.
+    
+    Args:
+        use_local: Использовать локальную модель
+        current_model: Текущая выбранная модель
+        
+    Returns:
+        Dict с новыми значениями UI компонентов
+    """
+    from enhanced_agent import OPENROUTER_MODELS
+    
+    if use_local:
+        # Локальная модель - используем фиксированное имя
+        return {
+            "dropdown": gr.update(visible=False, value=current_model if current_model else "openrouter/free"),
+            "status": f"Текущая модель: llama3.2:3b (локальная, Ollama)",
+            "info": gr.update(visible=True, 
+                value="⚠️ Режим локальной модели. MCP инструменты недоступны, используйте RAG и базовые знания.")
+        }
+    else:
+        # OpenRouter модель
+        model_names = [m["name"] for m in OPENROUTER_MODELS]
+        selected_model = current_model if current_model in model_names else model_names[0]
+        
+        return {
+            "dropdown": gr.update(visible=True, value=selected_model, choices=model_names),
+            "status": f"Текущая модель: {selected_model} (OpenRouter)",
+            "info": gr.update(visible=False, value="")
+        }
+
+
+def initialize_app(model_name: str, use_local: bool) -> str:
+    """
+    Инициализирует приложение с выбранной моделью.
+    
+    Args:
+        model_name: Название модели
+        use_local: Использовать локальную модель
+        
+    Returns:
+        Сообщение о результате
+    """
+    try:
+        # Останавливаем существующего агента
+        if app_state.agent:
+            try:
+                run_async(app_state.agent.disconnect_mcp())
+            except Exception:
+                pass
+        
+        # Инициализируем нового агента
+        agent, success = init_agent(model_name, use_local)
+        
+        if agent:
+            app_state.agent = agent
+            app_state.mcp_connected = success
+            app_state.selected_model = model_name
+            app_state.use_local_model = use_local
+            
+            # Обновляем статус в UI
+            model_type = "локальная (Ollama)" if use_local else "OpenRouter"
+            mcp_status_text = "✅ MCP подключен" if success else "❌ MCP не подключен"
+            
+            if use_local:
+                mcp_status_text += " (MCP недоступен для локальной модели)"
+            
+            return f"✅ Приложение инициализировано с моделью: {model_type}\n{mcp_status_text}"
+        else:
+            return "❌ Не удалось инициализировать агента"
+            
+    except Exception as e:
+        return f"❌ Ошибка инициализации приложения: {str(e)}"
 
 
 def update_loading_indicator(processing_state: bool) -> str:
@@ -508,16 +608,36 @@ with gr.Blocks(
         with gr.Column(scale=1):
             gr.Markdown("## ⚙️ Настройки")
             
-            # Выбор модели
-            model_names = [m["name"] for m in OPENROUTER_MODELS]
-            model_dropdown = gr.Dropdown(
-                choices=model_names,
-                value=model_names[0],
-                label="Выберите модель",
-                interactive=True
-            )
+            # Настройки модели
+            with gr.Group():
+                gr.Markdown("### Модель LLM")
+                
+                use_local_checkbox = gr.Checkbox(
+                    label="Использовать локальную модель Ollama (llama3.2:3b)",
+                    value=False,
+                    info="⚠️ Локальная модель не поддерживает MCP инструменты"
+                )
+                
+                # Информация о локальной модели
+                local_model_info = gr.Markdown(
+                    value="",
+                    visible=False
+                )
+                
+                # Модели OpenRouter (только когда не выбрана локальная модель)
+                model_names = [m["name"] for m in OPENROUTER_MODELS]
+                model_dropdown = gr.Dropdown(
+                    choices=model_names,
+                    value=model_names[0],
+                    label="Модель OpenRouter",
+                    interactive=True,
+                    visible=True
+                )
             
-            model_status = gr.Markdown(f"Модель: {model_names[0]}")
+            model_status = gr.Markdown(f"Текущая модель: {model_names[0]} (OpenRouter)")
+            
+            # Кнопка инициализации модели
+            init_model_btn = gr.Button("🔄 Инициализировать модель", variant="primary")
             
             gr.Markdown("## 💬 Управление диалогами")
             
@@ -615,7 +735,7 @@ with gr.Blocks(
         
         # Инициализация агента при первом сообщении
         if not app_state.agent:
-            agent, success = init_agent(app_state.selected_model)
+            agent, success = init_agent(app_state.selected_model, app_state.use_local_model)
             app_state.agent = agent
             app_state.mcp_connected = success
             
@@ -668,6 +788,42 @@ with gr.Blocks(
     )
     
     # Обновление модели
+    def update_model_ui_handler(use_local: bool):
+        """Обновляет UI при изменении чекбокса локальной модели."""
+        return update_model_ui(use_local, app_state.selected_model)
+    
+    # Обновление UI при изменении чекбокса локальной модели
+    use_local_checkbox.change(
+        fn=update_model_ui_handler,
+        inputs=[use_local_checkbox],
+        outputs=[model_dropdown, model_status, local_model_info]
+    )
+    
+    # Инициализация модели
+    def init_model_handler(use_local: bool, model_name: str):
+        """Инициализирует модель с выбранными параметрами."""
+        result = initialize_app(model_name, use_local)
+        
+        # Обновляем UI статуса
+        if app_state.agent:
+            conv_choices = get_conversations_choices(app_state.agent)
+            conv_value = get_current_conversation_value(app_state.agent)
+            conv_info = get_current_conversation_info(app_state.agent)
+            mcp_status_text = get_mcp_status()
+        else:
+            conv_choices = []
+            conv_value = ""
+            conv_info = "Агент не инициализирован"
+            mcp_status_text = "Агент не инициализирован"
+        
+        return result, conv_info, mcp_status_text, gr.update(choices=conv_choices, value=conv_value)
+    
+    init_model_btn.click(
+        fn=init_model_handler,
+        inputs=[use_local_checkbox, model_dropdown],
+        outputs=[conv_action_result, conversation_info, mcp_status, conversations_dropdown]
+    )
+    
     model_dropdown.change(
         fn=update_model,
         inputs=[model_dropdown],
